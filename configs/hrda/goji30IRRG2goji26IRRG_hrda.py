@@ -66,7 +66,7 @@ optimizer = dict(
             norm=dict(decay_mult=0.0),
         )))
 
-runner = dict(type='IterBasedRunner', max_iters=10000)
+runner = dict(type='IterBasedRunner', max_iters=20000)
 checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=5)
 evaluation = dict(interval=1000, metric='mIoU', save_best='mIoU')
 work_dir = 'shared-nvme/work_dirs/goji30IRRG2goji26IRRG_hrda_noDACS'

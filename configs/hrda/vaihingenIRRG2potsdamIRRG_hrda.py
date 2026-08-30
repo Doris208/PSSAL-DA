@@ -1,8 +1,4 @@
-"""
-HRDA 在 ISPRS Vaihingen IRRG -> Potsdam IRRG 上的配置文件。
-最高指挥手册,通过继承和覆盖，将模型架构、数据集、算法策略和优化参数组
-合成一个完整的训练任务配置。
-"""
+
 use_uda = True
 _base_ = [
     '../_base_/default_runtime.py',
