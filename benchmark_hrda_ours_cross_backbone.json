@@ -1,0 +1,64 @@
+{
+  "benchmark_defaults": {
+    "input_channels": 6,
+    "input_height": 256,
+    "input_width": 256,
+    "batch_size": 1,
+    "precision": "fp32",
+    "warmup": 50,
+    "iterations": 300,
+    "repeat": 5,
+    "flop_backend": "local_hook_counter",
+    "flop_convention": "1 MAC = 2 FLOPs"
+  },
+  "methods": [
+    {
+      "name": "HRDA-R101",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/hrda/baseline_resnet/goji30IRRG2goji26IRRG_baseline_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "HRDA_R101_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "HRDA-R101",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/hrda/baseline_resnet/goji26IRRG2goji30RGB_baseline_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "HRDA_R101_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "HRDA-R101",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/hrda/baseline_resnet/goji26RGB2goji30RGB_baseline_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "HRDA_R101_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "Ours / PSSAL-DA-MiT-B5",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/hrda/goji30IRRG2goji26IRRG_hrda_3vi_proto_struct_edge.py",
+      "checkpoint": null,
+      "checkpoint_env": "OURS_MITB5_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "Ours / PSSAL-DA-MiT-B5",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/hrda/goji26IRRG2goji30RGB_hrda_3vi_proto_struct_edge.py",
+      "checkpoint": null,
+      "checkpoint_env": "OURS_MITB5_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "Ours / PSSAL-DA-MiT-B5",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/hrda/goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge.py",
+      "checkpoint": null,
+      "checkpoint_env": "OURS_MITB5_CKPT_TASK3",
+      "adapter": "default"
+    }
+  ]
+}

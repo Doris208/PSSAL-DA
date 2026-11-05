@@ -62,7 +62,8 @@ def single_gpu_test(model,
                     show=False,
                     out_dir=None,
                     efficient_test=False,
-                    opacity=0.5):
+                    opacity=0.5,
+                    save_confidence=False):
     """Test with single GPU.
 
     Args:
@@ -76,6 +77,8 @@ def single_gpu_test(model,
         opacity(float): Opacity of painted segmentation map.
             Default 0.5.
             Must be in (0, 1] range.
+        save_confidence (bool): Explicitly export confidence maps, requiring
+            out_dir and an additional inference pass. Default: False.
     Returns:
         list: The prediction results.
     """
@@ -90,7 +93,7 @@ def single_gpu_test(model,
         with torch.no_grad():
             result = model(return_loss=False, **data)
             seg_prob = None
-            if out_dir is not None:
+            if out_dir is not None and save_confidence:
                 module = model.module if hasattr(model, 'module') else model
                 decode_head = getattr(module, 'decode_head', None)
                 if not (hasattr(decode_head, 'debug_output_attention')
@@ -101,27 +104,30 @@ def single_gpu_test(model,
                     seg_prob = module.inference(img, img_metas, rescale=True)
 
         if show or out_dir:
-            img_tensor = data['img'][0]
             img_metas = data['img_metas'][0].data[0]
-            img_norm_cfg = img_metas[0]['img_norm_cfg']
-            vis_img_tensor = img_tensor[:, :3, ...]
-            imgs = tensor2imgs(
-                vis_img_tensor,
-                mean=img_norm_cfg['mean'][:3],
-                std=img_norm_cfg['std'][:3],
-                to_rgb=img_norm_cfg.get('to_rgb', False))
+            if show:
+                img_tensor = data['img'][0]
+                img_norm_cfg = img_metas[0]['img_norm_cfg']
+                vis_img_tensor = img_tensor[:, :3, ...]
+                imgs = tensor2imgs(
+                    vis_img_tensor,
+                    mean=img_norm_cfg['mean'][:3],
+                    std=img_norm_cfg['std'][:3],
+                    to_rgb=img_norm_cfg.get('to_rgb', False))
+            else:
+                imgs = [None] * len(img_metas)
             assert len(imgs) == len(img_metas)
 
             for batch_idx, (img, img_meta) in enumerate(zip(imgs, img_metas)):
-                vis_channel_order = img_meta['img_norm_cfg'].get(
-                    'vis_channel_order', None)
-                if vis_channel_order is not None:
-                    img = img[..., vis_channel_order]
-                h, w, _ = img_meta['img_shape']
-                img_show = img[:h, :w, :]
-
-                ori_h, ori_w = img_meta['ori_shape'][:-1]
-                img_show = mmcv.imresize(img_show, (ori_w, ori_h))
+                if show:
+                    vis_channel_order = img_meta['img_norm_cfg'].get(
+                        'vis_channel_order', None)
+                    if vis_channel_order is not None:
+                        img = img[..., vis_channel_order]
+                    h, w, _ = img_meta['img_shape']
+                    img_show = img[:h, :w, :]
+                    ori_h, ori_w = img_meta['ori_shape'][:-1]
+                    img_show = mmcv.imresize(img_show, (ori_w, ori_h))
 
                 if out_dir:
                     target_prediction_file = osp.join(out_dir,

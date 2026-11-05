@@ -224,7 +224,9 @@ class StructPriorConsistencyGate(nn.Module):
               source_logits=None,
               source_probs=None,
               iter=0,
-              ignore_index=None):
+              ignore_index=None,
+              collect_debug=True,
+              log_stats=True):
         if ignore_index is not None:
             self.ignore_index = ignore_index
         if target_probs is None:
@@ -257,6 +259,11 @@ class StructPriorConsistencyGate(nn.Module):
         struct_mask = self._class_mask(pseudo_label,
                                        self.struct_positive_classes)
         if not self.use_target_gate:
+            if not collect_debug and not log_stats:
+                return pseudo_weight, dict(
+                    R_struct=r_struct.detach(), R_continuity=r_cont.detach(),
+                    R_adj=r_adj.detach(), R_sem=r_sem.detach(),
+                    final_pseudo_weight=pseudo_weight.detach())
             target_adj = self._adjacency_matrix_from_label(pseudo_label).detach()
             debug_dict = dict(
                 R_struct=r_struct.detach(),
@@ -304,6 +311,12 @@ class StructPriorConsistencyGate(nn.Module):
                                 ramp_den))
             final_gate = (1 - ramp) * torch.ones_like(gate) + ramp * gate
         new_pseudo_weight = pseudo_weight * final_gate
+
+        if not collect_debug and not log_stats:
+            return new_pseudo_weight, dict(
+                R_struct=r_struct.detach(), R_continuity=r_cont.detach(),
+                R_adj=r_adj.detach(), R_sem=r_sem.detach(),
+                final_pseudo_weight=new_pseudo_weight.detach())
 
         target_adj = self._adjacency_matrix_from_label(pseudo_label).detach()
         source_adj = self.source_adj_ema.detach().clone()

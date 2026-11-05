@@ -1,6 +1,6 @@
 dataset_type = 'GojiDataset'
-source_data_root = 'shared-nvme/mydataset/26'
-target_data_root = 'shared-nvme/mydataset/30'
+source_data_root = '/root/shared-nvme/mydataset/26'
+target_data_root = '/root/shared-nvme/mydataset/30'
 index_names = ['ndvi']
 
 source_img_norm_cfg = dict(

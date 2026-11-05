@@ -15,7 +15,7 @@ model = dict(
     type='HRDAEncoderDecoder',
     pretrained=None,
     backbone=dict(
-        pretrained='pretrained/mit_b5.pth',
+        pretrained='/root/HRDA-master/pretrained/mit_b5.pth',
         in_chans=6),
     decode_head=dict(
         type='HRDAHead',
@@ -71,7 +71,7 @@ optimizer = dict(
 runner = dict(type='IterBasedRunner', max_iters=20000)
 checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=5)
 evaluation = dict(interval=1000, metric='mIoU', save_best='mIoU')
-work_dir = 'shared-nvme/work_dirs/goji30IRRG2goji26IRRG_hrda_3vi'
+work_dir = '/root/shared-nvme/work_dirs/goji30IRRG2goji26IRRG_hrda_3vi'
 
 name = 'goji30IRRG2goji26IRRG_hrda_3vi'
 exp = 'goji_uda_indices'
@@ -92,7 +92,7 @@ log_config = make_log_config(False, False)
 runner = dict(type='IterBasedRunner', max_iters=20000)
 checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=5)
 evaluation = dict(interval=1000, metric='mIoU', save_best='mIoU')
-work_dir = 'shared-nvme/work_dirs/goji30IRRG2goji26IRRG/goji30IRRG2goji26IRRG_hrda_3vi'
+work_dir = '/root/shared-nvme/work_dirs/goji30IRRG2goji26IRRG/goji30IRRG2goji26IRRG_hrda_3vi'
 name = 'goji30IRRG2goji26IRRG_hrda_3vi'
 exp = 'goji_uda_indices_ablation20k_baseline'
 name_uda = 'dacs_3vi_baseline'

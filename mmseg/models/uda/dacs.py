@@ -72,6 +72,13 @@ class DACS(UDADecorator):
     def __init__(self, **cfg):
         super(DACS, self).__init__(**cfg)
         self.local_iter = 0
+        self.output_mode = cfg.get('output_mode', 'minimal')
+        if self.output_mode not in ('minimal', 'diagnostic'):
+            raise ValueError('output_mode must be minimal or diagnostic')
+        self.log_debug_stats = self.output_mode == 'diagnostic'
+        self.paper_process_logging = cfg.get('paper_process_logging', False)
+        self.save_class_mix_debug = self.log_debug_stats and cfg.get(
+            'save_class_mix_debug', False)
         self.max_iters = cfg['max_iters']
         self.alpha = cfg['alpha']
         self.pseudo_threshold = cfg['pseudo_threshold']
@@ -82,8 +89,8 @@ class DACS(UDADecorator):
         self.fdist_scale_min_ratio = cfg['imnet_feature_dist_scale_min_ratio']
         self.enable_fdist = self.fdist_lambda > 0
         self.enable_mixing = cfg.get('use_mixing', True)
-        self.save_teacher_pseudo_debug = cfg.get('save_teacher_pseudo_debug',
-                                                 True)
+        self.save_teacher_pseudo_debug = self.log_debug_stats and cfg.get(
+            'save_teacher_pseudo_debug', False)
         self.teacher_pseudo_debug_interval = cfg.get(
             'teacher_pseudo_debug_interval', 1000)
         self.teacher_pseudo_debug_max_samples = cfg.get(
@@ -168,7 +175,8 @@ class DACS(UDADecorator):
             self.phy_rampup_iters = self.phy_cfg.get('phy_rampup_iters', 0)
             self.detach_target_gate = self.phy_cfg.get(
                 'detach_target_gate', True)
-            self.save_phy_debug = self.phy_cfg.get('save_phy_debug', True)
+            self.save_phy_debug = self.log_debug_stats and self.phy_cfg.get(
+                'save_phy_debug', False)
             self.phy_debug_interval = self.phy_cfg.get(
                 'phy_debug_interval', 1000)
             self.phy_debug_max_samples = self.phy_cfg.get(
@@ -182,8 +190,9 @@ class DACS(UDADecorator):
             num_classes = cfg['model']['decode_head']['num_classes']
             struct_gate_cfg = deepcopy(self.struct_cfg)
             struct_gate_cfg.pop('enable', None)
-            self.save_struct_debug = struct_gate_cfg.pop(
-                'save_struct_debug', True)
+            self.save_struct_debug = self.log_debug_stats and self.struct_cfg.get(
+                'save_struct_debug', False)
+            struct_gate_cfg.pop('save_struct_debug', None)
             self.struct_debug_interval = struct_gate_cfg.pop(
                 'struct_debug_interval', 1000)
             self.struct_debug_max_samples = struct_gate_cfg.pop(
@@ -199,10 +208,13 @@ class DACS(UDADecorator):
         if self.enable_proto:
             proto_gate_cfg = deepcopy(self.proto_cfg)
             proto_gate_cfg.pop('enable', None)
-            self.save_proto_debug = proto_gate_cfg.get(
-                'save_proto_debug', True)
+            self.save_proto_debug = self.log_debug_stats and proto_gate_cfg.get(
+                'save_proto_debug', False)
             self.proto_debug_interval = proto_gate_cfg.get(
                 'proto_debug_interval', 1500)
+            proto_gate_cfg['log_stats'] = (self.log_debug_stats or
+                                           self.paper_process_logging)
+            proto_gate_cfg['collect_debug'] = self.save_proto_debug
             self.proto_gate = ProtoGate(**proto_gate_cfg)
         else:
             self.proto_gate = None
@@ -321,8 +333,8 @@ class DACS(UDADecorator):
                 'struct_classes', [2, 3, 4])
             self.joint_clamp_min = self.joint_gate_cfg.get('clamp_min', 0.0)
             self.joint_clamp_max = self.joint_gate_cfg.get('clamp_max', 1.0)
-            self.save_joint_debug = self.joint_gate_cfg.get(
-                'save_joint_debug', True)
+            self.save_joint_debug = self.log_debug_stats and self.joint_gate_cfg.get(
+                'save_joint_debug', False)
             self.joint_debug_interval = self.joint_gate_cfg.get(
                 'joint_debug_interval', 1000)
             self.joint_debug_dir = self.joint_gate_cfg.get(
@@ -388,6 +400,12 @@ class DACS(UDADecorator):
         optimizer.zero_grad()
         log_vars = self(**data_batch)
         optimizer.step()
+        # Sum already materialized loss scalars for reporting only. All
+        # backward calls and the optimizer update above remain unchanged.
+        log_vars['loss'] = sum(
+            value * (self.lambda_phy_src if name == 'loss_phy_src' else 1.0)
+            for name, value in log_vars.items()
+            if 'loss' in name and name != 'loss')
 
         outputs = dict(
             log_vars=log_vars, num_samples=len(data_batch['img_metas']))
@@ -475,14 +493,17 @@ class DACS(UDADecorator):
         return feat_loss, feat_log
 
     def update_debug_state(self):
-        if self.local_iter % self.debug_img_interval == 0:
+        if self.save_class_mix_debug and self.debug_img_interval > 0 and \
+                self.local_iter % self.debug_img_interval == 0:
             self.get_model().decode_head.debug = True
             self.get_ema_model().decode_head.debug = True
         else:
             self.get_model().decode_head.debug = False
             self.get_ema_model().decode_head.debug = False
         if self.mic is not None:
-            self.mic.debug = self.local_iter % self.debug_img_interval == 0
+            self.mic.debug = (self.save_class_mix_debug and
+                              self.debug_img_interval > 0 and
+                              self.local_iter % self.debug_img_interval == 0)
 
     def _get_teacher_debug_dir(self):
         debug_dir = self.teacher_pseudo_debug_dir
@@ -546,7 +567,8 @@ class DACS(UDADecorator):
         valid = gt.ne(255).unsqueeze(1)
         loss_phy_src = masked_bce_loss(r_phy_src, target, valid)
         log_vars['loss_phy_src'] = loss_phy_src.item()
-        log_vars['phy_src_mean'] = r_phy_src.detach().mean().item()
+        if self.log_debug_stats:
+            log_vars['phy_src_mean'] = r_phy_src.detach().mean().item()
         return r_phy_src, self.lambda_phy_src * loss_phy_src
 
     def _apply_phy_gate(self, target_vi_img, pseudo_label, pseudo_weight,
@@ -558,7 +580,8 @@ class DACS(UDADecorator):
                 size=pseudo_label.shape[-2:],
                 mode='bilinear',
                 align_corners=False)
-        log_vars['phy_tgt_mean'] = r_phy_tgt.detach().mean().item()
+        if self.log_debug_stats:
+            log_vars['phy_tgt_mean'] = r_phy_tgt.detach().mean().item()
         if not self.use_target_gate or self.local_iter < self.phy_warmup_iters:
             return r_phy_tgt, pseudo_weight, None
 
@@ -581,34 +604,35 @@ class DACS(UDADecorator):
         phy_weight[veg_mask] = gate[veg_mask]
         pseudo_weight = pseudo_weight * phy_weight
 
-        if veg_mask.any():
-            log_vars['phy_gate_mean'] = phy_weight[veg_mask].detach().mean().item()
-            log_vars['phy_gate_min'] = phy_weight[veg_mask].detach().min().item()
-            log_vars['phy_gate_max'] = phy_weight[veg_mask].detach().max().item()
-            log_vars['phy_retain_ratio'] = (
-                pseudo_weight[veg_mask] > 0).float().mean().item()
-            if self.phy_filter_threshold is not None:
-                log_vars['phy_filter_ratio'] = (
-                    gate_src[veg_mask].lt(self.phy_filter_threshold)
-                    .float().mean().item())
+        if self.log_debug_stats:
+            if veg_mask.any():
+                log_vars['phy_gate_mean'] = phy_weight[veg_mask].detach().mean().item()
+                log_vars['phy_gate_min'] = phy_weight[veg_mask].detach().min().item()
+                log_vars['phy_gate_max'] = phy_weight[veg_mask].detach().max().item()
+                log_vars['phy_retain_ratio'] = (
+                    pseudo_weight[veg_mask] > 0).float().mean().item()
+                if self.phy_filter_threshold is not None:
+                    log_vars['phy_filter_ratio'] = (
+                        gate_src[veg_mask].lt(self.phy_filter_threshold)
+                        .float().mean().item())
+                else:
+                    log_vars['phy_filter_ratio'] = 0.0
             else:
+                log_vars['phy_gate_mean'] = 1.0
+                log_vars['phy_gate_min'] = 1.0
+                log_vars['phy_gate_max'] = 1.0
+                log_vars['phy_retain_ratio'] = 1.0
                 log_vars['phy_filter_ratio'] = 0.0
-        else:
-            log_vars['phy_gate_mean'] = 1.0
-            log_vars['phy_gate_min'] = 1.0
-            log_vars['phy_gate_max'] = 1.0
-            log_vars['phy_retain_ratio'] = 1.0
-            log_vars['phy_filter_ratio'] = 0.0
-        goji_mask = pseudo_label == 0
-        veg_cls_mask = pseudo_label == 1
-        log_vars['phy_gate_goji_mean'] = (
-            phy_weight[goji_mask].detach().mean().item()
-            if goji_mask.any() else 1.0)
-        log_vars['phy_gate_general_vegetation_mean'] = (
-            phy_weight[veg_cls_mask].detach().mean().item()
-            if veg_cls_mask.any() else 1.0)
-        log_vars['phy_gate_vegetation_mean'] = log_vars['phy_gate_mean']
-        log_vars['phy_veg_pseudo_ratio'] = veg_mask.float().mean().item()
+            goji_mask = pseudo_label == 0
+            veg_cls_mask = pseudo_label == 1
+            log_vars['phy_gate_goji_mean'] = (
+                phy_weight[goji_mask].detach().mean().item()
+                if goji_mask.any() else 1.0)
+            log_vars['phy_gate_general_vegetation_mean'] = (
+                phy_weight[veg_cls_mask].detach().mean().item()
+                if veg_cls_mask.any() else 1.0)
+            log_vars['phy_gate_vegetation_mean'] = log_vars['phy_gate_mean']
+            log_vars['phy_veg_pseudo_ratio'] = veg_mask.float().mean().item()
         return r_phy_tgt, pseudo_weight, phy_weight
 
     def _save_phy_map(self, data, out_file, cmap='jet'):
@@ -665,6 +689,8 @@ class DACS(UDADecorator):
             self._save_phy_map(pseudo_weight[i], prefix + '_weight.png')
 
     def _log_struct_debug(self, struct_debug, log_vars):
+        if not self.log_debug_stats:
+            return
         scalar_keys = [
             'struct_gate_mean', 'struct_gate_struct_class_mean',
             'struct_gate_building_mean', 'struct_gate_water_mean',
@@ -678,6 +704,8 @@ class DACS(UDADecorator):
                 log_vars[key] = struct_debug[key].detach().item()
 
     def _log_proto_debug(self, proto_debug, log_vars):
+        if not self.log_debug_stats:
+            return
         scalar_keys = [
             'proto_weight_mean', 'proto_margin_mean', 'proto_valid_classes'
         ]
@@ -691,12 +719,17 @@ class DACS(UDADecorator):
                     log_vars[key] = proto_debug[key].detach().item()
 
     def _log_proto_update(self, prefix, proto_log, log_vars):
+        if not self.log_debug_stats and not (
+                self.paper_process_logging and prefix == 'proto_tgt'):
+            return
         if proto_log is None:
             return
         if 'update_ratio' in proto_log:
             log_vars[f'{prefix}_update_ratio'] = \
                 proto_log['update_ratio'].detach().item()
-        for cls in range(self.proto_cfg.get('num_classes', 5)):
+        classes = range(self.proto_cfg.get('num_classes', 5)) \
+            if self.log_debug_stats else ()
+        for cls in classes:
             key = f'update_class_{cls}_ratio'
             if key in proto_log:
                 log_vars[f'{prefix}_update_class_{cls}_ratio'] = \
@@ -737,7 +770,10 @@ class DACS(UDADecorator):
             source_gt=gt_semantic_seg,
             source_probs=source_probs,
             iter=self.local_iter,
-            ignore_index=255)
+            ignore_index=255,
+            collect_debug=(self.save_struct_debug or
+                           (self.enable_joint_gate and self.save_joint_debug)),
+            log_stats=self.log_debug_stats)
         self._log_struct_debug(struct_debug, log_vars)
         return pseudo_weight, struct_debug
 
@@ -756,6 +792,9 @@ class DACS(UDADecorator):
         joint_weight[struct_mask] = struct_pseudo_weight[struct_mask]
         joint_weight = joint_weight.clamp(
             min=self.joint_clamp_min, max=self.joint_clamp_max)
+
+        if not self.log_debug_stats and not self.save_joint_debug:
+            return joint_weight, {}
 
         changed = (joint_weight - original_pseudo_weight).abs().gt(1e-6)
         filtered = original_pseudo_weight.gt(0) & joint_weight.le(0)
@@ -1427,26 +1466,28 @@ class DACS(UDADecorator):
                 self.struct_edge_prob_weight * prob_edge +
                 self.struct_edge_img_weight * img_edge +
                 self.struct_edge_pair_weight * pair_response).clamp(0.0, 1.0)
-            if is_target:
-                log_vars[f'prob_edge_{prefix}_mean'] = \
-                    prob_edge.detach().mean().item()
-                log_vars[f'img_edge_{prefix}_mean'] = \
-                    img_edge.detach().mean().item()
-                log_vars[f'boundary_pair_response_{prefix}_mean'] = \
-                    pair_response.detach().mean().item()
-                log_vars[f'boundary_pair_prior_ready_{prefix}'] = \
-                    float(self.struct_edge_pair_prior_ready.item())
-            else:
-                log_vars[f'img_edge_{prefix}_mean'] = \
-                    img_edge.detach().mean().item()
+            if self.log_debug_stats:
+                if is_target:
+                    log_vars[f'prob_edge_{prefix}_mean'] = \
+                        prob_edge.detach().mean().item()
+                    log_vars[f'img_edge_{prefix}_mean'] = \
+                        img_edge.detach().mean().item()
+                    log_vars[f'boundary_pair_response_{prefix}_mean'] = \
+                        pair_response.detach().mean().item()
+                    log_vars[f'boundary_pair_prior_ready_{prefix}'] = \
+                        float(self.struct_edge_pair_prior_ready.item())
+                else:
+                    log_vars[f'img_edge_{prefix}_mean'] = \
+                        img_edge.detach().mean().item()
             edge_weight = gate * (loss_weight * warmup)
-            log_vars[f'struct_edge_w_{prefix}_mean'] = \
-                edge_weight.detach().mean().item()
-            log_vars[f'edge_weight_{prefix}_mean'] = \
-                edge_weight.detach().mean().item()
-            log_vars[f'fused_gate_{prefix}_mean'] = gate.detach().mean().item()
-            log_vars[f'ss_gate_{prefix}_mean'] = gate.detach().mean().item()
-            log_vars[f'struct_edge_ratio_{prefix}'] = self._edge_ratio(label)
+            if self.log_debug_stats:
+                log_vars[f'struct_edge_w_{prefix}_mean'] = \
+                    edge_weight.detach().mean().item()
+                log_vars[f'edge_weight_{prefix}_mean'] = \
+                    edge_weight.detach().mean().item()
+                log_vars[f'fused_gate_{prefix}_mean'] = gate.detach().mean().item()
+                log_vars[f'ss_gate_{prefix}_mean'] = gate.detach().mean().item()
+                log_vars[f'struct_edge_ratio_{prefix}'] = self._edge_ratio(label)
             return (edge_weight.detach()
                     if self.struct_edge_detach_gate else edge_weight)
         struct_gate = (self._build_img_struct_gate(img)
@@ -1459,8 +1500,9 @@ class DACS(UDADecorator):
             struct_gate, spec_gate, ref_tensor=img)
         spatial_gate = self._build_spatial_layout_gate(img, img_metas)
         gate = gate * spatial_gate
-        log_vars[f'spatial_layout_gate_{prefix}_mean'] = \
-            spatial_gate.detach().mean().item()
+        if self.log_debug_stats:
+            log_vars[f'spatial_layout_gate_{prefix}_mean'] = \
+                spatial_gate.detach().mean().item()
         if is_target:
             proto_gate = None
             if proto_debug is not None:
@@ -1469,35 +1511,38 @@ class DACS(UDADecorator):
                 gate, pseudo_weight=base_weight, proto_gate=proto_gate)
             pair_gate = self._build_boundary_pair_gate(label)
             gate = gate * pair_gate
-            log_vars[f'boundary_pair_gate_{prefix}_mean'] = \
-                pair_gate.detach().mean().item()
-            log_vars[f'boundary_pair_prior_ready_{prefix}'] = \
-                float(self.struct_edge_pair_prior_ready.item())
+            if self.log_debug_stats:
+                log_vars[f'boundary_pair_gate_{prefix}_mean'] = \
+                    pair_gate.detach().mean().item()
+                log_vars[f'boundary_pair_prior_ready_{prefix}'] = \
+                    float(self.struct_edge_pair_prior_ready.item())
             neighbor_gate = self._build_neighbor_patch_gate(label, img_metas)
             gate = gate * neighbor_gate
-            log_vars[f'neighbor_patch_gate_{prefix}_mean'] = \
-                neighbor_gate.detach().mean().item()
-            log_vars[f'neighbor_patch_memory_size_{prefix}'] = \
-                float(len(self.struct_edge_neighbor_memory))
+            if self.log_debug_stats:
+                log_vars[f'neighbor_patch_gate_{prefix}_mean'] = \
+                    neighbor_gate.detach().mean().item()
+                log_vars[f'neighbor_patch_memory_size_{prefix}'] = \
+                    float(len(self.struct_edge_neighbor_memory))
         edge_weight = gate * (loss_weight * warmup)
-        log_vars[f'struct_edge_w_{prefix}_mean'] = \
-            edge_weight.detach().mean().item()
-        log_vars[f'edge_weight_{prefix}_mean'] = \
-            edge_weight.detach().mean().item()
-        log_vars['edge_mode'] = self.local_iter * 0.0
-        if struct_gate is not None:
-            log_vars[f'img_struct_gate_{prefix}_mean'] = \
-                struct_gate.detach().mean().item()
-            log_vars[f'struct_gate_{prefix}_mean'] = \
-                struct_gate.detach().mean().item()
-        if spec_gate is not None:
-            log_vars[f'spec_gate_{prefix}_mean'] = \
-                spec_gate.detach().mean().item()
-            log_vars[f'spec_gate_{prefix}_max'] = \
-                spec_gate.detach().amax().item()
-        log_vars[f'fused_gate_{prefix}_mean'] = gate.detach().mean().item()
-        log_vars[f'ss_gate_{prefix}_mean'] = gate.detach().mean().item()
-        log_vars[f'struct_edge_ratio_{prefix}'] = self._edge_ratio(label)
+        if self.log_debug_stats:
+            log_vars[f'struct_edge_w_{prefix}_mean'] = \
+                edge_weight.detach().mean().item()
+            log_vars[f'edge_weight_{prefix}_mean'] = \
+                edge_weight.detach().mean().item()
+            log_vars['edge_mode'] = self.local_iter * 0.0
+            if struct_gate is not None:
+                log_vars[f'img_struct_gate_{prefix}_mean'] = \
+                    struct_gate.detach().mean().item()
+                log_vars[f'struct_gate_{prefix}_mean'] = \
+                    struct_gate.detach().mean().item()
+            if spec_gate is not None:
+                log_vars[f'spec_gate_{prefix}_mean'] = \
+                    spec_gate.detach().mean().item()
+                log_vars[f'spec_gate_{prefix}_max'] = \
+                    spec_gate.detach().amax().item()
+            log_vars[f'fused_gate_{prefix}_mean'] = gate.detach().mean().item()
+            log_vars[f'ss_gate_{prefix}_mean'] = gate.detach().mean().item()
+            log_vars[f'struct_edge_ratio_{prefix}'] = self._edge_ratio(label)
         if is_target:
             self._update_neighbor_patch_memory(label, img_metas)
         return edge_weight.detach() if self.struct_edge_detach_gate else edge_weight
@@ -1574,7 +1619,8 @@ class DACS(UDADecorator):
             struct_edge_weight=src_struct_edge_weight,
             return_feat=True)
         src_feat = clean_losses.pop('features')
-        seg_debug['Source'] = self.get_model().decode_head.debug_output
+        if self.save_class_mix_debug:
+            seg_debug['Source'] = self.get_model().decode_head.debug_output
         clean_loss, clean_log_vars = self._parse_losses(clean_losses)
         log_vars.update(clean_log_vars)
         clean_loss.backward(retain_graph=self.enable_fdist)
@@ -1624,27 +1670,27 @@ class DACS(UDADecorator):
                 m.training = False
         ema_logits = self.get_ema_model().generate_pseudo_label(
             target_img, target_img_metas)
-        seg_debug['Target'] = self.get_ema_model().decode_head.debug_output
+        if self.save_class_mix_debug:
+            seg_debug['Target'] = self.get_ema_model().decode_head.debug_output
 
         ema_softmax = torch.softmax(ema_logits.detach(), dim=1)
         del ema_logits
         teacher_target_confidence_map, pseudo_label = torch.max(
             ema_softmax, dim=1)
         teacher_raw_pseudo_label = pseudo_label
-        teacher_target_confidence_mean = \
-            teacher_target_confidence_map.mean().item()
-        retain_mask = teacher_target_confidence_map.ge(self.pseudo_threshold)
         if valid_pseudo_mask is not None:
             valid_pseudo_mask = valid_pseudo_mask.float().clamp(0, 1)
-        if valid_pseudo_mask is not None:
-            teacher_pseudo_label_retain_ratio = \
-                valid_pseudo_mask.mean().item()
-        else:
-            teacher_pseudo_label_retain_ratio = retain_mask.float().mean().item()
-        log_vars['teacher_target_confidence_mean'] = \
-            teacher_target_confidence_mean
-        log_vars['teacher_pseudo_label_retain_ratio'] = \
-            teacher_pseudo_label_retain_ratio
+        if self.log_debug_stats or self.paper_process_logging:
+            log_vars['teacher_target_confidence_mean'] = \
+                teacher_target_confidence_map.mean().item()
+        if self.log_debug_stats:
+            retain_mask = teacher_target_confidence_map.ge(self.pseudo_threshold)
+            if valid_pseudo_mask is not None:
+                teacher_pseudo_label_retain_ratio = valid_pseudo_mask.mean().item()
+            else:
+                teacher_pseudo_label_retain_ratio = retain_mask.float().mean().item()
+            log_vars['teacher_pseudo_label_retain_ratio'] = \
+                teacher_pseudo_label_retain_ratio
         self._maybe_save_teacher_pseudo_debug(teacher_raw_pseudo_label,
                                               teacher_target_confidence_map)
         pseudo_prob = teacher_target_confidence_map
@@ -1710,7 +1756,8 @@ class DACS(UDADecorator):
                         max(float(feat_rampup), 1.0)))
                 struct_prior_response = \
                     struct_debug['R_struct'].unsqueeze(1) * feat_ratio
-                log_vars['struct_feature_ratio'] = feat_ratio
+                if self.log_debug_stats:
+                    log_vars['struct_feature_ratio'] = feat_ratio
         joint_debug = None
         if self.enable_joint_gate:
             pseudo_weight, joint_debug = self._fuse_phy_struct_pseudo_weight(
@@ -1720,6 +1767,9 @@ class DACS(UDADecorator):
                 if self.enable_struct else original_pseudo_weight,
                 pseudo_label, log_vars)
         edge_conf_pseudo_weight = pseudo_weight.detach().clone()
+        if self.paper_process_logging:
+            # MPARC stage: after physiology/structure, before prototype weighting.
+            log_vars['mparc_pseudo_weight_mean'] = pseudo_weight.detach().mean().item()
         target_feat = None
         proto_debug = None
         if self.enable_proto:
@@ -1737,8 +1787,9 @@ class DACS(UDADecorator):
             self._log_proto_debug(proto_debug, log_vars)
             pseudo_weight = pseudo_weight * proto_weight.detach()
             del proto_weight
-        log_vars['final_pseudo_weight_mean'] = \
-            pseudo_weight.detach().mean().item()
+        if self.log_debug_stats:
+            log_vars['final_pseudo_weight_mean'] = \
+                pseudo_weight.detach().mean().item()
         final_gate_pseudo_weight = pseudo_weight.detach().clone()
         gt_pixel_weight = torch.ones((pseudo_weight.shape), device=dev)
         tgt_struct_edge_weight = self._build_struct_edge_weight(
@@ -1805,10 +1856,11 @@ class DACS(UDADecorator):
             if self.enable_struct_edge:
                 mixed_struct_edge_weight = torch.cat(
                     mixed_struct_edge_weight)
-                log_vars['struct_edge_w_mix_mean'] = \
-                    mixed_struct_edge_weight.detach().mean().item()
-                log_vars['struct_edge_ratio_mix'] = \
-                    self._edge_ratio(mixed_lbl)
+                if self.log_debug_stats or self.paper_process_logging:
+                    log_vars['struct_edge_w_mix_mean'] = \
+                        mixed_struct_edge_weight.detach().mean().item()
+                if self.log_debug_stats:
+                    log_vars['struct_edge_ratio_mix'] = self._edge_ratio(mixed_lbl)
             else:
                 mixed_struct_edge_weight = None
 
@@ -1821,7 +1873,8 @@ class DACS(UDADecorator):
                 struct_edge_weight=mixed_struct_edge_weight,
                 struct_prior_response=mixed_struct_prior_response,
                 return_feat=False)
-            seg_debug['Mix'] = self.get_model().decode_head.debug_output
+            if self.save_class_mix_debug:
+                seg_debug['Mix'] = self.get_model().decode_head.debug_output
             mix_losses = add_prefix(mix_losses, 'mix')
             mix_loss, mix_log_vars = self._parse_losses(mix_losses)
         else:
@@ -1833,8 +1886,9 @@ class DACS(UDADecorator):
                 struct_edge_weight=tgt_struct_edge_weight,
                 struct_prior_response=struct_prior_response,
                 return_feat=False)
-            seg_debug['TargetSelfTrain'] = \
-                self.get_model().decode_head.debug_output
+            if self.save_class_mix_debug:
+                seg_debug['TargetSelfTrain'] = \
+                    self.get_model().decode_head.debug_output
             tgt_losses = add_prefix(tgt_losses, 'tgt')
             mix_loss, mix_log_vars = self._parse_losses(tgt_losses)
         del gt_pixel_weight
@@ -1845,7 +1899,7 @@ class DACS(UDADecorator):
                 self.get_model(), img, img_metas, gt_semantic_seg,
                 target_img, target_img_metas, valid_pseudo_mask,
                 pseudo_label, pseudo_weight)
-            if self.mic.debug_output:
+            if self.save_class_mix_debug and self.mic.debug_output:
                 seg_debug.update(self.mic.debug_output)
             mic_losses = {}
             for key, value in masked_losses.items():
@@ -1901,7 +1955,8 @@ class DACS(UDADecorator):
         if self.enable_proto:
             self._maybe_save_proto_debug(proto_debug, final_gate_pseudo_weight)
 
-        if self.local_iter % self.debug_img_interval == 0:
+        if self.save_class_mix_debug and self.debug_img_interval > 0 and \
+                self.local_iter % self.debug_img_interval == 0:
             out_dir = os.path.join(self.train_cfg['work_dir'],
                                    'class_mix_debug')
             os.makedirs(out_dir, exist_ok=True)

@@ -18,7 +18,7 @@ def make_phy_cfg(enable):
         phy_warmup_iters=6000,
         phy_rampup_iters=4000,
         detach_target_gate=True,
-        save_phy_debug=True,
+        save_phy_debug=False,
         phy_debug_interval=1000,
         phy_debug_max_samples=50,
         phy_head=dict(in_channels=3, mid_channels=32, num_layers=2))
@@ -50,7 +50,7 @@ def make_struct_cfg(enable):
         adjacency_power=0.8,
         semantic_power=0.5,
         detach_gate=True,
-        save_struct_debug=True,
+        save_struct_debug=False,
         struct_debug_interval=1000,
         struct_debug_max_samples=50,
         struct_debug_dir='struct_gate_debug')
@@ -81,9 +81,9 @@ def make_proto_cfg(enable):
         lambda_proto_src=0.0,
         loss_start=6000,
         min_valid_classes_for_loss=3,
-        save_proto_debug=True,
+        save_proto_debug=False,
         proto_debug_interval=1000,
-        log_class_stats=True,
+        log_class_stats=False,
         detach=True,
         separate_domain_prototypes=True,
         prototype_fusion_weight=0.5)
@@ -147,42 +147,19 @@ def make_uda_override(physiology=False,
                       prototype=False,
                       edge=False):
     return dict(
+        output_mode='minimal',
+        paper_process_logging=False,
+        save_class_mix_debug=False,
+        save_teacher_pseudo_debug=False,
         phy_cfg=make_phy_cfg(physiology),
         struct_cfg=make_struct_cfg(structural),
         proto_cfg=make_proto_cfg(prototype),
         struct_edge_cfg=make_edge_cfg(edge),
-        joint_gate_cfg=dict(enable=False))
+        joint_gate_cfg=dict(enable=False, save_joint_debug=False))
 
 
 def make_log_config(prototype=False, edge=False):
-    keys = [
-        'loss', 'decode.loss_seg', 'decode.acc_seg',
-        'mix.decode.loss_seg', 'mix.decode.acc_seg',
-        'teacher_target_confidence_mean',
-        'teacher_pseudo_label_retain_ratio',
-        'final_pseudo_weight_mean',
-        'loss_phy_src', 'loss_phy_tgt',
-        'phy_tgt_mean', 'phy_gate_mean',
-        'R_struct_mean', 'struct_feature_ratio',
-        'struct_gate_mean', 'struct_gate_struct_class_mean',
-        'struct_continuity_mean', 'struct_adj_mean', 'struct_sem_mean'
-    ]
-    if prototype:
-        keys.extend([
-            'loss_proto_tgt', 'proto_weight_mean', 'proto_margin_mean',
-            'proto_valid_classes', 'proto_src_update_ratio',
-            'proto_tgt_update_ratio'
-        ])
-    if edge:
-        keys.extend([
-            'decode.loss_struct_edge', 'mix.decode.loss_struct_edge',
-            'struct_edge_w_mix_mean', 'prob_edge_tgt_mean',
-            'img_edge_tgt_mean', 'boundary_pair_response_tgt_mean',
-            'boundary_pair_prior_ready_tgt'
-        ])
+    # Loss keys are retained by the logger automatically, including new losses.
     return dict(
         interval=50,
-        hooks=[dict(
-            type='PrecisionLoggerHook',
-            by_epoch=False,
-            console_keys=keys)])
+        hooks=[dict(type='PrecisionLoggerHook', by_epoch=False)])

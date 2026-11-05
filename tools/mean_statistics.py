@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-GOJI_DEFAULT_ROOT = 'shared-nvme/mydataset/26'
+GOJI_DEFAULT_ROOT = '/root/shared-nvme/mydataset/26'
 
 
 def parse_args():
@@ -18,7 +18,7 @@ def parse_args():
         '--data-root',
         default=GOJI_DEFAULT_ROOT,
         help='Dataset root or image directory. For goji, this is usually '
-        'shared-nvme/mydataset/26 or shared-nvme/mydataset/30.')
+        '/root/shared-nvme/mydataset/26 or /root/shared-nvme/mydataset/30.')
     parser.add_argument(
         '--img-dir',
         default='img_dir/train',

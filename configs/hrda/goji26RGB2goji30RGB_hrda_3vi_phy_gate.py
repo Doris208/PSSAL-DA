@@ -11,8 +11,8 @@ _base_ = [
 seed = 0
 crop_size = (256, 256)
 dataset_type = 'GojiDataset'
-source_data_root = 'shared-nvme/mydataset/26'
-target_data_root = 'shared-nvme/mydataset/30'
+source_data_root = '/root/shared-nvme/mydataset/26'
+target_data_root = '/root/shared-nvme/mydataset/30'
 index_names = ['ndvi', 'ndre', 'cire']
 vi_names = index_names
 vi_norm_cfg = dict(
@@ -79,7 +79,7 @@ model = dict(
     type='HRDAEncoderDecoder',
     pretrained=None,
     backbone=dict(
-        pretrained='pretrained/mit_b5.pth',
+        pretrained='/root/HRDA-master/pretrained/mit_b5.pth',
         in_chans=6),
     decode_head=dict(
         type='HRDAHead',
@@ -191,7 +191,7 @@ optimizer = dict(
 runner = dict(type='IterBasedRunner', max_iters=20000)
 checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=5)
 evaluation = dict(interval=1000, metric='mIoU', save_best='mIoU')
-work_dir = 'shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_3vi_phy_gate_v2'
+work_dir = '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_3vi_phy_gate_v2'
 
 name = 'goji26RGB2goji30RGB_hrda_3vi_phy_gate_v2'
 exp = 'goji_uda_indices_phy'
@@ -213,7 +213,7 @@ log_config = make_log_config(False, False)
 runner = dict(type='IterBasedRunner', max_iters=20000)
 checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=5)
 evaluation = dict(interval=1000, metric='mIoU', save_best='mIoU')
-work_dir = 'shared-nvme/work_dirs/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_phy_gate'
+work_dir = '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_phy_gate'
 name = 'goji26RGB2goji30RGB_hrda_3vi_phy_gate'
 exp = 'goji_uda_indices_ablation20k_physiology'
 name_uda = 'dacs_3vi_physiology'

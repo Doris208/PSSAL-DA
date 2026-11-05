@@ -1,6 +1,6 @@
 dataset_type = 'LoveDADataset'
-source_data_root = 'shared-nvme/LoveDA/'
-target_data_root = 'shared-nvme/LoveDA/'
+source_data_root = '/root/shared-nvme/LoveDA/'
+target_data_root = '/root/shared-nvme/LoveDA/'
 
 source_img_norm_cfg = dict(
     mean=[75.274, 79.875, 78.403],

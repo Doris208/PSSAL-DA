@@ -1,0 +1,6 @@
+{
+    "_base_": "../../hrda/vaihingenIRRG2potsdamIRRG_hrda.py",
+    "name": "260312_1712_vaihingenIRRG2potsdamIRRG_hrda_300d2",
+    "work_dir": "work_dirs/local-isprs_uda/260312_1712_vaihingenIRRG2potsdamIRRG_hrda_300d2",
+    "git_rev": ""
+}

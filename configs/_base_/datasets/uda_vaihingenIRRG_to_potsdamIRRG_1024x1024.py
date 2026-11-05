@@ -1,6 +1,6 @@
 dataset_type = 'ISPRSDataset'
-source_data_root = 'shared-nvme/ISPRS_dataset/Vaihingen/'
-target_data_root = 'shared-nvme/ISPRS_dataset/Potsdam/IRRG/'
+source_data_root = '/root/shared-nvme/ISPRS_dataset/Vaihingen/'
+target_data_root = '/root/shared-nvme/ISPRS_dataset/Potsdam/IRRG/'
 
 # Source domain (Vaihingen IRRG)
 source_img_norm_cfg = dict(

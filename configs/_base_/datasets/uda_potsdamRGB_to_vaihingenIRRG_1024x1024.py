@@ -1,6 +1,6 @@
 dataset_type = 'ISPRSDataset'
-source_data_root = 'shared-nvme/ISPRS_dataset/Potsdam/RGB/'
-target_data_root = 'shared-nvme/ISPRS_dataset/Vaihingen/'
+source_data_root = '/root/shared-nvme/ISPRS_dataset/Potsdam/RGB/'
+target_data_root = '/root/shared-nvme/ISPRS_dataset/Vaihingen/'
 
 # Source domain (Potsdam RGB)
 # These normalization stats use the standard RGB/ImageNet convention so the

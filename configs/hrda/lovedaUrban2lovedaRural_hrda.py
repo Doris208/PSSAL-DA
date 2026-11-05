@@ -14,7 +14,7 @@ crop_size = (512, 512)
 model = dict(
     type='HRDAEncoderDecoder',
     pretrained=None,
-    backbone=dict(pretrained='pretrained/mit_b5.pth'),
+    backbone=dict(pretrained='/root/HRDA-master/pretrained/mit_b5.pth'),
     decode_head=dict(
         type='HRDAHead',
         single_scale_head='DAFormerHead',

@@ -15,7 +15,7 @@ model = dict(
     type='HRDAEncoderDecoder',
     pretrained=None,
     backbone=dict(
-        pretrained='pretrained/mit_b5.pth',
+        pretrained='/root/HRDA-master/pretrained/mit_b5.pth',
         in_chans=4),
     decode_head=dict(
         type='HRDAHead',
@@ -68,10 +68,10 @@ optimizer = dict(
             norm=dict(decay_mult=0.0),
         )))
 
-runner = dict(type='IterBasedRunner', max_iters=20000)
+runner = dict(type='IterBasedRunner', max_iters=10000)
 checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=5)
 evaluation = dict(interval=1000, metric='mIoU', save_best='mIoU')
-work_dir = 'shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_ndvi'
+work_dir = '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_ndvi'
 
 name = 'goji26RGB2goji30RGB_hrda_ndvi'
 exp = 'goji_uda_indices'

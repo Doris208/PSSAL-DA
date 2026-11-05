@@ -28,16 +28,16 @@ PALETTE = np.array(
 IGNORE_INDEX = 255
 
 
-DEFAULT_GT_DIR = 'shared-nvme/mydataset/30/ann_dir/test'
+DEFAULT_GT_DIR = '/root/shared-nvme/mydataset/30/ann_dir/test'
 DEFAULT_METHODS = (
     ('Baseline',
-     'shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_3vi_phy_gate_True/'
+     '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_3vi_phy_gate_True/'
      'preds/target_prediction'),
     ('+MPARC',
-     'shared-nvme/work_dirs/goji26RGB2goji30RGB/'
+     '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB/'
      'goji26RGB2goji30RGB_hrda_3vi_phy_struct_gate/preds/target_prediction'),
     ('Full',
-     'shared-nvme/work_dirs/goji26RGB2goji30RGB/'
+     '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB/'
      'goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge/preds/target_prediction'),
 )
 DEFAULT_COUNT_CORRECTIONS = {

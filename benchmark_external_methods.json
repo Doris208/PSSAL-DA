@@ -1,0 +1,304 @@
+{
+  "benchmark_defaults": {
+    "input_channels": 6,
+    "input_height": 256,
+    "input_width": 256,
+    "batch_size": 1,
+    "precision": "fp32",
+    "warmup": 50,
+    "iterations": 300,
+    "repeat": 5,
+    "flop_backend": "local_hook_counter",
+    "flop_convention": "1 MAC = 2 FLOPs"
+  },
+  "methods": [
+    {
+      "name": "Source Only",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/hrda/noDACS_resnet/goji30IRRG2goji26IRRG_noDACS_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "SOURCE_ONLY_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "Source Only",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/hrda/noDACS_resnet/goji26IRRG2goji30RGB_noDACS_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "SOURCE_ONLY_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "Source Only",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/hrda/noDACS_resnet/goji26RGB2goji30RGB_noDACS_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "SOURCE_ONLY_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "DAFormer",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/daformer/goji30IRRG2goji26IRRG_daformer_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "DAFORMER_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "DAFormer",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/daformer/goji26IRRG2goji30RGB_daformer_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "DAFORMER_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "DAFormer",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/daformer/goji26RGB2goji30RGB_daformer_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "DAFORMER_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "HRDA",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/hrda/goji30IRRG2goji26IRRG_hrda_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "HRDA_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "HRDA",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/hrda/goji26IRRG2goji30RGB_hrda_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "HRDA_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "HRDA",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/hrda/goji26RGB2goji30RGB_hrda_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "HRDA_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "HRDA-R101",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/hrda/baseline_resnet/goji30IRRG2goji26IRRG_baseline_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "HRDA_R101_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "HRDA-R101",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/hrda/baseline_resnet/goji26IRRG2goji30RGB_baseline_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "HRDA_R101_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "HRDA-R101",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/hrda/baseline_resnet/goji26RGB2goji30RGB_baseline_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "HRDA_R101_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "MIC",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/mic/goji30IRRG2goji26IRRG_mic_hrda.py",
+      "checkpoint": null,
+      "checkpoint_env": "MIC_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "MIC",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/mic/goji26IRRG2goji30RGB_mic_hrda.py",
+      "checkpoint": null,
+      "checkpoint_env": "MIC_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "MIC",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/mic/goji26RGB2goji30RGB_mic_hrda.py",
+      "checkpoint": null,
+      "checkpoint_env": "MIC_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "DACS",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/dacs/goji30IRRG2goji26IRRG_dacs_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "DACS_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "DACS",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/dacs/goji26IRRG2goji30RGB_dacs_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "DACS_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "DACS",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/dacs/goji26RGB2goji30RGB_dacs_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "DACS_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "SePiCo",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/sepico/goji30IRRG2goji26IRRG_sepico_distcl_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "SEPICO_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "SePiCo",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/sepico/goji26IRRG2goji30RGB_sepico_distcl_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "SEPICO_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "SePiCo",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/sepico/goji26RGB2goji30RGB_sepico_distcl_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "SEPICO_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "ProCA",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/proca/goji30IRRG2goji26IRRG_proca_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "PROCA_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "ProCA",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/proca/goji26IRRG2goji30RGB_proca_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "PROCA_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "ProCA",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/proca/goji26RGB2goji30RGB_proca_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "PROCA_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "AdvEnt",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/advent/goji30IRRG2goji26IRRG_advent_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "ADVENT_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "AdvEnt",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/advent/goji26IRRG2goji30RGB_advent_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "ADVENT_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "AdvEnt",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/advent/goji26RGB2goji30RGB_advent_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "ADVENT_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "MemoryAdaptNet",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/memoryadaptnet/goji30IRRG2goji26IRRG_memoryadaptnet_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "MEMORYADAPTNET_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "MemoryAdaptNet",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/memoryadaptnet/goji26IRRG2goji30RGB_memoryadaptnet_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "MEMORYADAPTNET_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "MemoryAdaptNet",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/memoryadaptnet/goji26RGB2goji30RGB_memoryadaptnet_r101_3vi.py",
+      "checkpoint": null,
+      "checkpoint_env": "MEMORYADAPTNET_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "Ours / PSSAL-DA",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/hrda/resnet_101/goji30IRRG2goji26IRRG_ours_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "OURS_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "Ours / PSSAL-DA",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/hrda/resnet_101/goji26IRRG2goji30RGB_ours_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "OURS_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "Ours / PSSAL-DA",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/hrda/resnet_101/goji26RGB2goji30RGB_ours_resnet101.py",
+      "checkpoint": null,
+      "checkpoint_env": "OURS_CKPT_TASK3",
+      "adapter": "default"
+    },
+    {
+      "name": "Ours / PSSAL-DA-MiT-B5",
+      "task": "goji30IRRG2goji26IRRG",
+      "config": "configs/hrda/goji30IRRG2goji26IRRG_hrda_3vi_proto_struct_edge.py",
+      "checkpoint": null,
+      "checkpoint_env": "OURS_MITB5_CKPT_TASK1",
+      "adapter": "default"
+    },
+    {
+      "name": "Ours / PSSAL-DA-MiT-B5",
+      "task": "goji26IRRG2goji30RGB",
+      "config": "configs/hrda/goji26IRRG2goji30RGB_hrda_3vi_proto_struct_edge.py",
+      "checkpoint": null,
+      "checkpoint_env": "OURS_MITB5_CKPT_TASK2",
+      "adapter": "default"
+    },
+    {
+      "name": "Ours / PSSAL-DA-MiT-B5",
+      "task": "goji26RGB2goji30RGB",
+      "config": "configs/hrda/goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge.py",
+      "checkpoint": null,
+      "checkpoint_env": "OURS_MITB5_CKPT_TASK3",
+      "adapter": "default"
+    }
+  ]
+}

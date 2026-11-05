@@ -11,6 +11,7 @@ import argparse
 import copy
 import os
 import os.path as osp
+import shutil
 import sys
 import time
 
@@ -26,7 +27,7 @@ from mmseg.models.builder import build_train_model
 from mmseg.utils import collect_env, get_root_logger
 from mmseg.utils.collect_env import gen_code_archive
 
-DEFAULT_WORK_DIR_ROOT = 'shared-nvme/work_dirs'
+DEFAULT_WORK_DIR_ROOT = '/root/shared-nvme/work_dirs'
 
 
 def maybe_disable_uda(cfg):
@@ -104,6 +105,13 @@ def main(args):
     if args.options is not None:
         cfg.merge_from_dict(args.options)
     cfg = maybe_disable_uda(cfg)
+    if 'uda' in cfg:
+        for hook in cfg.log_config.hooks:
+            if hook['type'] == 'PrecisionLoggerHook':
+                hook.setdefault('output_mode', cfg.uda.get(
+                    'output_mode', 'minimal'))
+                hook.setdefault('paper_process_logging', cfg.uda.get(
+                    'paper_process_logging', False))
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
         torch.backends.cudnn.benchmark = True
@@ -137,10 +145,15 @@ def main(args):
 
     # create work_dir
     mmcv.mkdir_or_exist(osp.abspath(cfg.work_dir))
+    # Preserve the input config before writing the expanded effective config.
+    source_copy = osp.join(cfg.work_dir, 'source_' + osp.basename(args.config))
+    if osp.abspath(args.config) != osp.abspath(source_copy):
+        shutil.copyfile(args.config, source_copy)
     # dump config
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
     # snapshot source code
-    gen_code_archive(cfg.work_dir)
+    if cfg.get('archive_source_code', False):
+        gen_code_archive(cfg.work_dir)
     # init the logger before other steps
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
@@ -156,6 +169,8 @@ def main(args):
     logger.info('Environment info:\n' + dash_line + env_info + '\n' +
                 dash_line)
     meta['env_info'] = env_info
+    meta['git_commit'] = get_git_hash()
+    logger.info(f'Git commit: {meta["git_commit"]}')
 
     # log some basic info
     logger.info(f'Distributed training: {distributed}')

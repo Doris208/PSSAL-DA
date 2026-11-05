@@ -39,7 +39,7 @@ log_config = make_log_config(True, True)
 runner = dict(type='IterBasedRunner', max_iters=20000)
 checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=5)
 evaluation = dict(interval=1000, metric='mIoU', save_best='mIoU')
-work_dir = 'shared-nvme/work_dirs/goji26IRRG2goji30RGB/goji26IRRG2goji30RGB_hrda_3vi_proto_struct_edge_safe'
+work_dir = '/root/shared-nvme/work_dirs/goji26IRRG2goji30RGB/goji26IRRG2goji30RGB_hrda_3vi_proto_struct_edge_safe'
 name = 'goji26IRRG2goji30RGB_hrda_3vi_proto_struct_edge_safe'
 exp = 'goji_uda_indices_ablation20k_mparc_pbcr_safe'
 name_dataset = 'goji26IRRG2goji30RGB_256x256_3vi_proto_struct_edge_safe'

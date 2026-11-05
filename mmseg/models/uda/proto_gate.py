@@ -32,7 +32,9 @@ class ProtoGate(nn.Module):
                  log_class_stats=True,
                  detach=True,
                  separate_domain_prototypes=False,
-                 prototype_fusion_weight=0.5):
+                 prototype_fusion_weight=0.5,
+                 log_stats=True,
+                 collect_debug=True):
         super().__init__()
         self.num_classes = num_classes
         self.ignore_index = ignore_index
@@ -60,6 +62,8 @@ class ProtoGate(nn.Module):
         self.detach = detach
         self.separate_domain_prototypes = separate_domain_prototypes
         self.prototype_fusion_weight = prototype_fusion_weight
+        self.log_stats = log_stats
+        self.collect_debug = collect_debug
 
         self.register_buffer('prototypes', torch.empty(0))
         self.register_buffer('proto_counts', torch.zeros(num_classes))
@@ -121,6 +125,8 @@ class ProtoGate(nn.Module):
             align_corners=False).squeeze(1)
 
     def _empty_update_log(self, feat):
+        if not self.log_stats:
+            return {}
         dev = self._select_feat(feat).device
         log = dict(update_ratio=torch.tensor(0.0, device=dev))
         if self.log_class_stats:
@@ -136,7 +142,7 @@ class ProtoGate(nn.Module):
         label = self._resize_label(label, feat.shape[-2:])
         valid = valid & label.ne(self.ignore_index)
         total = valid.numel()
-        updated = feat.new_zeros(())
+        updated = feat.new_zeros(()) if self.log_stats else None
         class_ratios = []
         flat_feat = feat.permute(0, 2, 3, 1).reshape(-1, feat.shape[1])
         flat_label = label.reshape(-1)
@@ -144,7 +150,8 @@ class ProtoGate(nn.Module):
         for cls in range(self.num_classes):
             cls_mask = flat_valid & flat_label.eq(cls)
             cls_pixels = cls_mask.sum()
-            class_ratios.append(cls_pixels.float() / max(float(total), 1.0))
+            if self.log_stats and self.log_class_stats:
+                class_ratios.append(cls_pixels.float() / max(float(total), 1.0))
             if cls_pixels.item() < self.min_pixels:
                 continue
             new_proto = flat_feat[cls_mask].mean(dim=0)
@@ -174,9 +181,12 @@ class ProtoGate(nn.Module):
                 self.prototypes[cls] = F.normalize(
                     self.prototypes[cls], dim=0)
             self.proto_counts[cls] += cls_pixels.float()
-            updated = updated + cls_pixels.float()
+            if self.log_stats:
+                updated = updated + cls_pixels.float()
         if self.separate_domain_prototypes:
             self._refresh_fused_prototypes()
+        if not self.log_stats:
+            return {}
         log = dict(update_ratio=updated / max(float(total), 1.0))
         if self.log_class_stats:
             for cls, ratio in enumerate(class_ratios):
@@ -237,36 +247,47 @@ class ProtoGate(nn.Module):
             sim = sim.masked_fill(invalid.view(1, -1, 1, 1), -2.0)
         return sim
 
+    def _weight_debug(self, weight, margin=None, label=None):
+        # proto_weight is also consumed by optional boundary reliability gates.
+        debug = dict(proto_weight=weight.detach())
+        if self.collect_debug:
+            debug['proto_margin'] = (margin.detach() if margin is not None
+                                     else weight.new_zeros(weight.shape))
+        if not self.log_stats:
+            return debug
+        debug['proto_weight_mean'] = weight.detach().mean()
+        debug['proto_valid_classes'] = self.valid_proto.float().sum().detach()
+        valid = label.ne(self.ignore_index) if label is not None else None
+        debug['proto_margin_mean'] = (
+            margin.detach()[valid].mean()
+            if margin is not None and valid is not None and valid.any()
+            else weight.new_tensor(0.0))
+        if margin is not None and self.log_class_stats:
+            for cls in range(self.num_classes):
+                mask = label.eq(cls)
+                debug[f'proto_weight_class_{cls}_mean'] = (
+                    weight.detach()[mask].mean()
+                    if mask.any() else weight.new_tensor(1.0))
+                debug[f'proto_margin_class_{cls}_mean'] = (
+                    margin.detach()[mask].mean()
+                    if mask.any() else margin.new_tensor(0.0))
+        return debug
+
     def compute_weight(self, feat, pseudo_label, out_size=None, iter=None):
         feat = self._select_feat(feat)
         size = out_size if out_size is not None else pseudo_label.shape[-2:]
         if iter is not None and iter < self.weight_start:
             weight = feat.new_ones((feat.shape[0], *size))
-            debug = dict(
-                proto_weight=weight.detach(),
-                proto_margin=feat.new_zeros(weight.shape),
-                proto_weight_mean=weight.mean().detach(),
-                proto_margin_mean=feat.new_tensor(0.0),
-                proto_valid_classes=self.valid_proto.float().sum().detach())
+            debug = self._weight_debug(weight)
             return weight, debug
         if self.prototypes.numel() == 0 or not self.valid_proto.any():
             weight = feat.new_ones((feat.shape[0], *size))
-            debug = dict(
-                proto_weight=weight.detach(),
-                proto_margin=feat.new_zeros(weight.shape),
-                proto_weight_mean=weight.mean().detach(),
-                proto_margin_mean=feat.new_tensor(0.0),
-                proto_valid_classes=self.valid_proto.float().sum().detach())
+            debug = self._weight_debug(weight)
             return weight, debug
         if self.min_valid_classes_for_weight > 0 and \
                 self.valid_proto.float().sum() < self.min_valid_classes_for_weight:
             weight = feat.new_ones((feat.shape[0], *size))
-            debug = dict(
-                proto_weight=weight.detach(),
-                proto_margin=feat.new_zeros(weight.shape),
-                proto_weight_mean=weight.mean().detach(),
-                proto_margin_mean=feat.new_tensor(0.0),
-                proto_valid_classes=self.valid_proto.float().sum().detach())
+            debug = self._weight_debug(weight)
             return weight, debug
 
         label = self._resize_label(pseudo_label, feat.shape[-2:])
@@ -301,31 +322,17 @@ class ProtoGate(nn.Module):
             apply_mask & valid_label & class_has_proto, proto_weight,
             torch.ones_like(proto_weight))
 
-        debug = dict(
-            proto_weight=proto_weight.detach(),
-            proto_margin=margin.detach(),
-            proto_weight_mean=proto_weight.detach().mean(),
-            proto_margin_mean=margin.detach()[valid_label].mean()
-            if valid_label.any() else margin.new_tensor(0.0),
-            proto_valid_classes=self.valid_proto.float().sum().detach())
-        if self.log_class_stats:
-            for cls in range(self.num_classes):
-                cls_mask = label.eq(cls)
-                debug[f'proto_weight_class_{cls}_mean'] = (
-                    proto_weight.detach()[cls_mask].mean()
-                    if cls_mask.any() else proto_weight.new_tensor(1.0))
-                debug[f'proto_margin_class_{cls}_mean'] = (
-                    margin.detach()[cls_mask].mean()
-                    if cls_mask.any() else margin.new_tensor(0.0))
+        debug = self._weight_debug(proto_weight, margin, label)
 
         if out_size is not None and proto_weight.shape[-2:] != out_size:
             proto_weight = F.interpolate(
                 proto_weight.unsqueeze(1), size=out_size, mode='bilinear',
                 align_corners=False).squeeze(1).clamp(0.0, 1.0)
             debug['proto_weight'] = proto_weight.detach()
-            debug['proto_margin'] = F.interpolate(
-                margin.unsqueeze(1), size=out_size, mode='bilinear',
-                align_corners=False).squeeze(1).detach()
+            if 'proto_margin' in debug:
+                debug['proto_margin'] = F.interpolate(
+                    margin.unsqueeze(1), size=out_size, mode='bilinear',
+                    align_corners=False).squeeze(1).detach()
         return proto_weight, debug
 
     def loss_target(self, feat, pseudo_label, final_weight, iter=None):

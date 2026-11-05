@@ -18,6 +18,7 @@ class PSSALSupervised(UDADecorator):
     def __init__(self, **cfg):
         super(PSSALSupervised, self).__init__(**cfg)
         self.local_iter = 0
+        self.log_debug_stats = cfg.get('output_mode', 'minimal') == 'diagnostic'
         self.max_iters = cfg['max_iters']
         self.phy_cfg = cfg.get('phy_cfg', dict(enable=False))
         self.enable_phy = self.phy_cfg.get('enable', False)
@@ -52,6 +53,8 @@ class PSSALSupervised(UDADecorator):
         if self.enable_proto:
             proto_gate_cfg = dict(self.proto_cfg)
             proto_gate_cfg.pop('enable', None)
+            proto_gate_cfg['log_stats'] = self.log_debug_stats
+            proto_gate_cfg['collect_debug'] = self.log_debug_stats
             self.proto_gate = ProtoGate(**proto_gate_cfg)
         else:
             self.proto_gate = None
@@ -216,11 +219,12 @@ class PSSALSupervised(UDADecorator):
             self.struct_edge_pair_weight * pair_response).clamp(0.0, 1.0)
         weight = gate * (self.struct_edge_loss_weight_src *
                          self._edge_warmup_ratio())
-        log_vars['prob_edge_src_mean'] = prob_edge.detach().mean().item()
-        log_vars['img_edge_src_mean'] = img_edge.detach().mean().item()
-        log_vars['boundary_pair_response_src_mean'] = \
-            pair_response.detach().mean().item()
-        log_vars['struct_edge_w_src_mean'] = weight.detach().mean().item()
+        if self.log_debug_stats:
+            log_vars['prob_edge_src_mean'] = prob_edge.detach().mean().item()
+            log_vars['img_edge_src_mean'] = img_edge.detach().mean().item()
+            log_vars['boundary_pair_response_src_mean'] = \
+                pair_response.detach().mean().item()
+            log_vars['struct_edge_w_src_mean'] = weight.detach().mean().item()
         return weight.detach()
 
     def _compute_phy_loss(self, vi_img, gt, log_vars):
@@ -231,7 +235,8 @@ class PSSALSupervised(UDADecorator):
         valid = label.ne(255).unsqueeze(1)
         loss_phy = masked_bce_loss(r_phy, target, valid)
         log_vars['loss_phy_src'] = loss_phy.detach().item()
-        log_vars['R_phy_mean'] = r_phy.detach().mean().item()
+        if self.log_debug_stats:
+            log_vars['R_phy_mean'] = r_phy.detach().mean().item()
         return self.lambda_phy_src * loss_phy
 
     def _student_probs(self, img, img_metas):
@@ -272,9 +277,12 @@ class PSSALSupervised(UDADecorator):
                 source_gt=gt_semantic_seg,
                 source_probs=probs_detached,
                 iter=self.local_iter,
-                ignore_index=255)
-            log_vars['R_struct_mean'] = \
-                struct_debug['R_struct'].detach().mean().item()
+                ignore_index=255,
+                collect_debug=self.log_debug_stats,
+                log_stats=self.log_debug_stats)
+            if self.log_debug_stats:
+                log_vars['R_struct_mean'] = \
+                    struct_debug['R_struct'].detach().mean().item()
             if self.struct_cfg.get('use_feature_interaction', False):
                 feat_warmup = self.struct_cfg.get(
                     'feature_interaction_warmup_iters',
@@ -289,7 +297,8 @@ class PSSALSupervised(UDADecorator):
                             max(float(feat_rampup), 1.0)))
                     struct_prior_response = \
                         struct_debug['R_struct'].unsqueeze(1) * feat_ratio
-                    log_vars['struct_feature_ratio'] = feat_ratio
+                    if self.log_debug_stats:
+                        log_vars['struct_feature_ratio'] = feat_ratio
         struct_edge_weight = self._struct_edge_weight(
             img, gt_semantic_seg, probs_detached, log_vars)
         losses = self.get_model().forward_train(

@@ -24,11 +24,11 @@ def parse_args():
         description='Generate binary error maps for Goji predictions.')
     parser.add_argument(
         '--gt-dir',
-        default=r'shared-nvme\mydataset\30\ann_dir\test',
+        default=r'D:\Local_HRDA\shared-nvme\mydataset\30\ann_dir\test',
         help='Ground-truth label directory.')
     parser.add_argument(
         '--out-dir',
-        default=(r'shared-nvme\goji26RGB2goji30RGB'
+        default=(r'D:\Local_HRDA\shared-nvme\goji26RGB2goji30RGB'
                  r'\baseline_MPARC_Full\error_maps'),
         help='Output root for error maps and CSV summary.')
     parser.add_argument(
@@ -51,7 +51,7 @@ def parse_args():
 
 
 def default_methods():
-    root = Path(r'shared-nvme\goji26RGB2goji30RGB')
+    root = Path(r'D:\Local_HRDA\shared-nvme\goji26RGB2goji30RGB')
     return [
         ('baseline',
          root / 'goji26RGB2goji30RGB_hrda_3vi_phy_gate_True' / 'preds' /

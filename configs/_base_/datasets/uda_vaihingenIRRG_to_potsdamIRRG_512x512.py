@@ -1,6 +1,6 @@
 dataset_type = 'ISPRSDataset'
-source_data_root = 'shared-nvme/ISPRS_dataset/Vaihingen/'
-target_data_root = 'shared-nvme/ISPRS_dataset/Potsdam/IRRG/'
+source_data_root = '/root/shared-nvme/ISPRS_dataset/Vaihingen/'
+target_data_root = '/root/shared-nvme/ISPRS_dataset/Potsdam/IRRG/'
 
 source_img_norm_cfg = dict(
     mean=[80.593, 81.922, 120.426],

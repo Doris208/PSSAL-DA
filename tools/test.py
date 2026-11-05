@@ -82,6 +82,10 @@ def parse_args():
     parser.add_argument(
         '--show-dir', help='directory where painted images will be saved')
     parser.add_argument(
+        '--save-confidence-map', action='store_true',
+        help='Also export confidence heatmaps to --show-dir; requires an '
+        'additional inference pass. Disabled by default.')
+    parser.add_argument(
         '--gpu-collect',
         action='store_true',
         help='whether to use gpu to collect results.')
@@ -124,6 +128,8 @@ def main():
 
     if args.eval and args.format_only:
         raise ValueError('--eval and --format_only cannot be both specified')
+    if args.save_confidence_map and not args.show_dir:
+        raise ValueError('--save-confidence-map requires --show-dir')
 
     if args.out is not None and not args.out.endswith(('.pkl', '.pickle')):
         raise ValueError('The output file must be a pkl file.')
@@ -223,7 +229,8 @@ def main():
     if not distributed:
         model = MMDataParallel(model, device_ids=[0])
         outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
-                                  efficient_test, args.opacity)
+                                  efficient_test, args.opacity,
+                                  save_confidence=args.save_confidence_map)
     else:
         model = MMDistributedDataParallel(
             model.cuda(),

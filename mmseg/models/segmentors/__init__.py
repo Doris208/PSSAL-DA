@@ -3,8 +3,11 @@
 
 from .base import BaseSegmentor
 from .encoder_decoder import EncoderDecoder
+from .encoder_decoder_projector import EncoderDecoderProjector
 from .hrda_encoder_decoder import HRDAEncoderDecoder
+from .memory_adapt_encoder_decoder import MemoryAdaptEncoderDecoder
 
 __all__ = [
-    'BaseSegmentor', 'EncoderDecoder', 'HRDAEncoderDecoder'
+    'BaseSegmentor', 'EncoderDecoder', 'EncoderDecoderProjector',
+    'HRDAEncoderDecoder', 'MemoryAdaptEncoderDecoder'
 ]

@@ -42,7 +42,7 @@ def parse_args():
         description='Convert goji dataset to mmsegmentation format')
     parser.add_argument(
         '--dataset_path',
-        default='shared-nvme/mydataset',
+        default='/root/shared-nvme/mydataset',
         help='path to the prepared goji dataset root')
     parser.add_argument(
         '-o',

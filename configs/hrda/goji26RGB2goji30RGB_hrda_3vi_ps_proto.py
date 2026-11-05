@@ -106,7 +106,7 @@ log_config = dict(
                 'proto_src_update_ratio', 'proto_tgt_update_ratio'
             ])
     ])
-work_dir = 'shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_3vi_ps_proto'
+work_dir = '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_3vi_ps_proto'
 name = 'goji26RGB2goji30RGB_hrda_3vi_ps_proto'
 exp = 'goji_uda_indices_ps_proto'
 name_dataset = 'goji26RGB2goji30RGB_256x256_3vi_ps_proto'
@@ -124,7 +124,7 @@ log_config = make_log_config(True, False)
 runner = dict(type='IterBasedRunner', max_iters=20000)
 checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=5)
 evaluation = dict(interval=1000, metric='mIoU', save_best='mIoU')
-work_dir = 'shared-nvme/work_dirs/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_ps_proto'
+work_dir = '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_ps_proto'
 name = 'goji26RGB2goji30RGB_hrda_3vi_ps_proto'
 exp = 'goji_uda_indices_ablation20k_prototype'
 name_uda = 'dacs_3vi_prototype'

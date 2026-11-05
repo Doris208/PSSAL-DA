@@ -5,7 +5,7 @@ from configs.hrda.sg_bde_proto_edge_common import make_sg_bde_proto_edge
 model, uda, log_config = make_sg_bde_proto_edge('struct')
 del make_sg_bde_proto_edge
 
-work_dir = 'shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge'
+work_dir = '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge'
 name = 'goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge'
 exp = 'goji_uda_indices_proto_struct_edge'
 name_dataset = 'goji26RGB2goji30RGB_256x256_3vi_proto_struct_edge'
@@ -23,7 +23,7 @@ log_config = make_log_config(True, True)
 runner = dict(type='IterBasedRunner', max_iters=20000)
 checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=5)
 evaluation = dict(interval=1000, metric='mIoU', save_best='mIoU')
-work_dir = 'shared-nvme/work_dirs/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge'
+work_dir = '/root/shared-nvme/work_dirs/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge'
 name = 'goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge'
 exp = 'goji_uda_indices_ablation20k_mparc_pbcr'
 name_uda = 'dacs_3vi_mparc_pbcr'

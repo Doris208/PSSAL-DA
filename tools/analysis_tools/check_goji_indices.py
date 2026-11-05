@@ -17,7 +17,7 @@ def parse_args():
         description='Check Goji image/label/index patch alignment.')
     parser.add_argument(
         '--dataset_path',
-        default='shared-nvme/mydataset',
+        default='/root/shared-nvme/mydataset',
         help='Goji dataset root that contains 26/ and 30/.')
     parser.add_argument('--region', required=True, choices=['26', '30'])
     parser.add_argument(

@@ -9,6 +9,7 @@ from .fcn_head import FCNHead
 from .hrda_head import HRDAHead
 from .isa_head import ISAHead
 from .psp_head import PSPHead
+from .proj_head import ProjHead
 from .segformer_head import SegFormerHead
 from .sep_aspp_head import DepthwiseSeparableASPPHead
 from .uper_head import UPerHead
@@ -25,4 +26,5 @@ __all__ = [
     'DAFormerHead',
     'ISAHead',
     'HRDAHead',
+    'ProjHead',
 ]

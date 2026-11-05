@@ -63,13 +63,23 @@ class PrecisionLoggerHook(LoggerHook):
                  out_suffix=('.log.json', '.log', '.py'),
                  keep_local=True,
                  console_keys=None,
-                 file_client_args=None):
+                 file_client_args=None,
+                 json_keys=None,
+                 output_mode='minimal',
+                 paper_process_logging=False,
+                 log_memory=False):
         super(PrecisionLoggerHook, self).__init__(interval, ignore_last,
                                                   reset_flag, by_epoch)
         self.by_epoch = by_epoch
         self.time_sec_tot = 0
         self.interval_exp_name = interval_exp_name
         self.console_keys = None if console_keys is None else set(console_keys)
+        self.json_keys = None if json_keys is None else set(json_keys)
+        if output_mode not in ('minimal', 'diagnostic'):
+            raise ValueError('output_mode must be minimal or diagnostic')
+        self.output_mode = output_mode
+        self.paper_process_logging = paper_process_logging
+        self.log_memory = log_memory
 
         if out_dir is None and file_client_args is not None:
             raise ValueError(
@@ -119,6 +129,18 @@ class PrecisionLoggerHook(LoggerHook):
             dist.reduce(mem_mb, 0, op=dist.ReduceOp.MAX)
         return mem_mb.item()
 
+    def _keep_train_key(self, name, keys):
+        if name in ('mode', 'epoch', 'iter', 'lr', 'time', 'data_time',
+                    'memory') or 'loss' in name or name.split('.')[-1] == 'acc_seg':
+            return True
+        if self.paper_process_logging and name in (
+                'teacher_target_confidence_mean', 'mparc_pseudo_weight_mean',
+                'proto_tgt_update_ratio', 'struct_edge_w_mix_mean'):
+            return True
+        if self.output_mode == 'diagnostic':
+            return keys is None or name in keys
+        return keys is not None and name in keys
+
     def _log_info(self, log_dict, runner):
         # print exp name for users to distinguish experiments
         # at every ``interval_exp_name`` iterations and the end of each epoch
@@ -156,7 +178,7 @@ class PrecisionLoggerHook(LoggerHook):
                 log_str += f'time: {log_dict["time"]:.3f}, ' \
                            f'data_time: {log_dict["data_time"]:.3f}, '
                 # statistic memory
-                if torch.cuda.is_available():
+                if 'memory' in log_dict:
                     log_str += f'memory: {log_dict["memory"]}, '
         else:
             # val/test time
@@ -169,7 +191,10 @@ class PrecisionLoggerHook(LoggerHook):
             else:
                 log_str = f'Iter({log_dict["mode"]}) [{log_dict["iter"]}]\t'
 
+        minimal_train = log_dict['mode'] == 'train' and self.output_mode == 'minimal'
         log_items = []
+        detail_items = OrderedDict(
+            source=[], mix=[], target=[], aux=[], stats=[])
         for name, val in log_dict.items():
             # TODO: resolve this hack
             # these items have been in log_str
@@ -178,14 +203,37 @@ class PrecisionLoggerHook(LoggerHook):
                     'memory', 'epoch'
             ]:
                 continue
-            if log_dict['mode'] == 'train' and \
-                    self.console_keys is not None and \
-                    name not in self.console_keys:
+            if log_dict['mode'] == 'train' and not self._keep_train_key(
+                    name, self.console_keys):
                 continue
-            if isinstance(val, float):
+            is_train_acc = (log_dict['mode'] == 'train' and
+                            name.split('.')[-1] == 'acc_seg')
+            if is_train_acc:
+                # Existing MMSeg accuracy is already on a 0..100 scale.
+                val = f'{val:.2f}%'
+            elif isinstance(val, float):
                 val = f'{val:.4f}'
-            log_items.append(f'{name}: {val}')
+            item = f'{name}: {val}'
+            if minimal_train and name == 'loss':
+                log_items.insert(0, item)
+            elif not minimal_train or is_train_acc:
+                log_items.append(item)
+            elif 'loss' in name:
+                if name.startswith('decode.'):
+                    detail_items['source'].append(item)
+                elif name.startswith('mix.'):
+                    detail_items['mix'].append(item)
+                elif name.startswith('tgt.'):
+                    detail_items['target'].append(item)
+                else:
+                    detail_items['aux'].append(item)
+            else:
+                detail_items['stats'].append(item)
         log_str += ', '.join(log_items)
+        if minimal_train:
+            for group, items in detail_items.items():
+                if items:
+                    log_str += f'\n    {group}: ' + ', '.join(items)
 
         runner.logger.info(log_str)
 
@@ -193,6 +241,9 @@ class PrecisionLoggerHook(LoggerHook):
         # dump log in json format
         json_log = OrderedDict()
         for k, v in log_dict.items():
+            if log_dict.get('mode') == 'train' and not self._keep_train_key(
+                    k, self.json_keys):
+                continue
             json_log[k] = self._round_float(v)
         # only append log at last line
         if runner.rank == 0:
@@ -207,11 +258,15 @@ class PrecisionLoggerHook(LoggerHook):
         if 'eval_iter_num' in runner.log_buffer.output:
             # this doesn't modify runner.iter and is regardless of by_epoch
             cur_iter = runner.log_buffer.output.pop('eval_iter_num')
+            # IterTimerHook can add `time` after evaluation cleared the buffer.
+            # The explicit evaluation marker takes precedence over that timer.
+            mode = 'val'
         else:
             cur_iter = self.get_iter(runner, inner_iter=True)
+            mode = self.get_mode(runner)
 
         log_dict = OrderedDict(
-            mode=self.get_mode(runner),
+            mode=mode,
             epoch=self.get_epoch(runner),
             iter=cur_iter)
 
@@ -226,12 +281,16 @@ class PrecisionLoggerHook(LoggerHook):
                 assert isinstance(lr_, list)
                 log_dict['lr'].update({k: lr_[0]})
 
-        if 'time' in runner.log_buffer.output:
+        if self.log_memory and mode == 'train' and \
+                'time' in runner.log_buffer.output:
             # statistic memory
             if torch.cuda.is_available():
                 log_dict['memory'] = self._get_max_memory(runner)
 
         log_dict = dict(log_dict, **runner.log_buffer.output)
+        if mode == 'val':
+            log_dict.pop('time', None)
+            log_dict.pop('data_time', None)
 
         self._log_info(log_dict, runner)
         self._dump_log(log_dict, runner)

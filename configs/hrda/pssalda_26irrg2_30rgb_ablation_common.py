@@ -1,4 +1,5 @@
 use_uda = True
+archive_source_code = False
 
 _base_ = [
     '../_base_/default_runtime.py',
@@ -79,7 +80,7 @@ model = dict(
     type='HRDAEncoderDecoder',
     pretrained=None,
     backbone=dict(
-        pretrained='/root/HRDA-master/pretrained/mit_b5.pth',
+        pretrained='/root/shared-nvme/pretrained/mit_b5.pth',
         in_chans=6),
     decode_head=dict(
         type='HRDAHead',
@@ -100,6 +101,10 @@ model = dict(
 
 uda = dict(
     type='DACS',
+    output_mode='minimal',
+    paper_process_logging=False,
+    save_class_mix_debug=False,
+    save_teacher_pseudo_debug=False,
     use_mixing=True,
     alpha=0.999,
     pseudo_threshold=0.968,
@@ -117,11 +122,11 @@ uda = dict(
     input_channel_order=['B', 'G', 'R', 'NDVI', 'NDRE', 'CIRE'],
     class_names=['goji', 'vegetation', 'building', 'water', 'road'],
     reduced_label_note='raw labels 1..5 are reduced to 0..4; ignore=255',
-    phy_cfg=dict(enable=False),
-    struct_cfg=dict(enable=False),
-    proto_cfg=dict(enable=False),
+    phy_cfg=dict(enable=False, save_phy_debug=False),
+    struct_cfg=dict(enable=False, save_struct_debug=False),
+    proto_cfg=dict(enable=False, save_proto_debug=False, log_class_stats=False),
     struct_edge_cfg=dict(enable=False),
-    joint_gate_cfg=dict(enable=False))
+    joint_gate_cfg=dict(enable=False, save_joint_debug=False))
 
 data = dict(
     samples_per_gpu=2,
