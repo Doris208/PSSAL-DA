@@ -291,7 +291,8 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def replay_node(config, row, output, device, data_root=None, phy_evidence=False, reference_evidence=False):
+def replay_node(config, row, output, device, data_root=None, phy_evidence=False,
+                reference_evidence=False, target_filename=None):
     from mmcv import Config
     from mmseg.models.builder import build_train_model
     from mmseg.utils.mechanism import deterministic_probe_config, load_probe_sample, readonly_probe
@@ -305,10 +306,25 @@ def replay_node(config, row, output, device, data_root=None, phy_evidence=False,
     if not saved_text:
         raise ValueError('Checkpoint lacks meta.config; historical mechanism settings cannot be verified')
     historical = Config.fromstring(saved_text, '.py')
-    signature = inference_signature(config)
+    requested_mode = config.get('uda', {}).get('phy_cfg', {}).get('mode', 'legacy_binary')
+    saved_mode = historical.get('uda', {}).get('phy_cfg', {}).get('mode', 'legacy_binary')
+    if requested_mode != saved_mode:
+        raise ValueError('Physiology checkpoint mode mismatch: saved={}, requested={}. '
+                         'Replay legacy checkpoints using their saved historical config.'.format(
+                             saved_mode, requested_mode))
+    runtime = deepcopy(config)
+    schedule_info = {}
+    if requested_mode == 'hierarchical_gv':
+        from mmseg.models.uda.phy_reliability import restore_phy_gate_config, phy_gate_parameters
+        runtime.uda.phy_cfg = restore_phy_gate_config(config.uda.phy_cfg, historical.uda.phy_cfg)
+        schedule_info = dict(phy_gate_config_source='checkpoint meta.config',
+            requested_phy_gate=phy_gate_parameters(config.uda.phy_cfg),
+            effective_phy_gate=phy_gate_parameters(runtime.uda.phy_cfg))
+        schedule_info['historical_phy_schedule'] = (
+            schedule_info['requested_phy_gate'] != schedule_info['effective_phy_gate'])
+    signature = inference_signature(runtime)
     if signature != inference_signature(historical):
         raise ValueError('Provided configuration differs from saved model/branch/input settings')
-    runtime = deepcopy(config)
     runtime.runner = deepcopy(historical.runner)
     # Construction only. No runner, optimizer, init_weights or training entry point is invoked.
     runtime.model.pretrained = None
@@ -326,11 +342,18 @@ def replay_node(config, row, output, device, data_root=None, phy_evidence=False,
                  else deterministic_probe_config(runtime))
     if not probe_cfg.get('filename'):
         raise ValueError('Configuration does not resolve one of the three required fixed target images')
+    if target_filename is not None:
+        if Path(target_filename).name != target_filename or Path(target_filename).suffix.lower() != '.tif':
+            raise ValueError('Offline target filename must be one TIFF basename in the validation split')
+        probe_cfg.update(filename=target_filename, selection_policy='explicit_offline_target_val_v1')
+        target = probe_cfg['dataset']
+        probe_cfg['expected_path'] = str((Path(target['data_root']) / target['img_dir'] / target_filename).resolve())
     sample, sample_meta = load_probe_sample(probe_cfg, model)
     sample_meta['data_source'] = 'checkpoint_replay'
     folder = Path(output) / Path(probe_cfg['filename']).stem / ('iter_{:06d}_{}'.format(
         row['completed_iter'], row['checkpoint_sha256'][:12]))
     source_files = ('mmseg/utils/mechanism.py', 'mmseg/models/uda/dacs.py',
+        'mmseg/models/uda/phy_reliability.py',
         'mmseg/datasets/goji.py', 'mmseg/datasets/pipelines/loading.py', 'mmseg/vi_utils.py',
         'mmseg/models/uda/proto_gate.py', 'mmseg/models/uda/struct_prior_gate.py',
         'mmseg/models/segmentors/hrda_encoder_decoder.py', 'mmseg/models/decode_heads/hrda_head.py',
@@ -355,6 +378,7 @@ def replay_node(config, row, output, device, data_root=None, phy_evidence=False,
         source_sha256={name:file_digest(ROOT/name) for name in source_files},
         historical_code_identity='Checkpoint does not provide hashes for all mechanism source files',
         target_update_executed=False, ema_update_executed=False)
+    metadata.update(schedule_info)
     if recovery['requested_modules']['proto']:
         gate = model.proto_gate
         metadata['prototype'] = dict(valid_classes=int(gate.valid_proto.sum())
@@ -431,6 +455,8 @@ def main():
     selection.add_argument('--all-checkpoints', action='store_true', help='explicit expansion after the pilot')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--target-data-root', help='explicit local mirror of this target domain, ending in 26 or 30')
+    parser.add_argument('--phy-evidence', action='store_true', help='Offline reference-label analysis after inference')
+    parser.add_argument('--target-filenames', nargs='+', help='Preselected validation TIFF basenames for offline multi-tile evidence')
     args = parser.parse_args()
     if args.recursive and not args.audit_only:
         parser.error('--recursive is limited to --audit-only to avoid mixing experiments')
@@ -467,13 +493,15 @@ def main():
         raise RuntimeError('CUDA unavailable; select --device cpu explicitly for CPU replay')
     results = []
     for row in selected:
-        try:
-            result = replay_node(config, row, output, device, args.target_data_root)
-        except Exception as error:
-            result = dict(iter=row['completed_iter'], checkpoint=row['path'], status='failed',
-                          error='{}: {}'.format(type(error).__name__, error))
-        results.append(result)
-        print(json.dumps(result, ensure_ascii=False))
+        for filename in args.target_filenames or [None]:
+            try:
+                result = replay_node(config, row, output, device, args.target_data_root,
+                                     phy_evidence=args.phy_evidence, target_filename=filename)
+            except Exception as error:
+                result = dict(iter=row['completed_iter'], checkpoint=row['path'], status='failed',
+                              sample_id=filename, error='{}: {}'.format(type(error).__name__, error))
+            results.append(result)
+            print(json.dumps(result, ensure_ascii=False))
     steps = '_'.join(str(r['iter']) for r in results)
     write_json(output/('replay_report_'+steps+'.json'), dict(data_source='checkpoint_replay', results=results))
     return 0 if results and all(r['status']=='complete' for r in results) else 1

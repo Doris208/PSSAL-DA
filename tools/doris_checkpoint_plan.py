@@ -8,7 +8,7 @@ def applies(config):
     return bool(re.fullmatch(
         r'doris_(goji26RGB2goji30RGB|goji26IRRG2goji30RGB|goji30IRRG2goji26IRRG)'
         r'_hrda_?3vi(?:_phy_gate|_struct_gate|_phy_struct_gate|_ps_proto|_struct_edge|'
-        r'_pbcr|_proto_struct_edge)?', config.get('name', '')))
+        r'_pbcr|_proto_struct_edge)?(?:_hphy15k|_hphy_early3k|_hphy_early4k)?', config.get('name', '')))
 
 
 def checkpoint_plan(config):
@@ -36,10 +36,13 @@ def checkpoint_plan(config):
     phy, struct, proto, edge = [uda.get(k, {}) for k in
         ('phy_cfg', 'struct_cfg', 'proto_cfg', 'struct_edge_cfg')]
     if phy.get('enable') and phy.get('use_target_gate', True):
-        start, ramp = phy.get('phy_warmup_iters', 1000), phy.get('phy_rampup_iters', 0)
-        event('phy', 'gate_start', start)
-        if ramp > 0:
-            event('phy', 'ramp_end', start + ramp)
+        if phy.get('mode') == 'hierarchical_gv' and phy.get('phy_gate_schedule') == 'early_nonzero_linear':
+            event('phy', 'ramp_end', phy['phy_gate_full_iter'])
+        else:
+            start, ramp = phy.get('phy_warmup_iters', 1000), phy.get('phy_rampup_iters', 0)
+            event('phy', 'gate_start', start)
+            if ramp > 0:
+                event('phy', 'ramp_end', start + ramp)
     if struct.get('enable'):
         start, ramp = struct.get('struct_warmup_iters', 6000), struct.get('struct_rampup_iters', 4000)
         if struct.get('use_target_gate', True):
@@ -95,6 +98,31 @@ def check_output_directory(config):
     if directory.exists() and any(directory.iterdir()) and not config.get('resume_from'):
         raise FileExistsError('DORIS work_dir is not empty; use a new --work-dir or an explicit '
                               '--resume-from for continuation: ' + str(directory))
+
+
+def check_hphy_training_checkpoint(config):
+    """Reject schedule changes before loading or writing a resumed experiment."""
+    phy = config.get('uda', {}).get('phy_cfg', {})
+    path = config.get('resume_from') or config.get('load_from')
+    if not path or not phy.get('enable') or phy.get('mode') != 'hierarchical_gv':
+        return
+    import torch
+    from mmcv import Config
+    from mmseg.models.uda.phy_reliability import phy_gate_parameters
+    checkpoint = torch.load(path, map_location='cpu')
+    meta = checkpoint.get('meta', {})
+    saved = meta.get('phy_cfg')
+    if saved is None and meta.get('config'):
+        saved = Config.fromstring(meta['config'], '.py').get('uda', {}).get('phy_cfg')
+    if not saved or saved.get('mode') != 'hierarchical_gv':
+        raise ValueError('Checkpoint lacks a verifiable H-Phy schedule and head configuration')
+    current_gate, saved_gate = phy_gate_parameters(phy), phy_gate_parameters(saved)
+    for key in ('phy_min_weight', 'use_target_gate'):
+        current_gate[key] = phy.get(key, .5 if key == 'phy_min_weight' else True)
+        saved_gate[key] = saved.get(key, .5 if key == 'phy_min_weight' else True)
+    if current_gate != saved_gate:
+        raise ValueError('H-Phy gate schedule mismatch. A new schedule requires a fresh experiment. '
+                         'Requested {}, saved {}'.format(current_gate, saved_gate))
 
 
 def audit_configs(loader):

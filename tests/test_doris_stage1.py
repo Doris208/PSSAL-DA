@@ -6,6 +6,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+from pathlib import Path
 import random
 import time
 from types import SimpleNamespace
@@ -21,6 +22,11 @@ HAS_BASELINE = (ROOT / 'outputs/doris_stage1_before.json').is_file()
 def new_model(direction='goji26IRRG2goji30RGB'):
     cfg = helpers.static_config('configs/hrda/doris/' + direction + '/doris_' + direction +
                                 '_hrda_3vi_proto_struct_edge.py')
+    # These historical response/replay fixtures retain the original binary head.
+    # H-Phy configurations and gradients are exercised separately in test_hphy.
+    cfg['uda']['phy_cfg'].update(mode='legacy_binary', phy_min_weight=.82,
+                                 phy_filter_threshold=.30, phy_warmup_iters=6000,
+                                 phy_rampup_iters=4000, phy_gate_schedule='legacy_warmup_linear')
     cls = helpers.dacs_component()
     model = cls(**cfg['uda'], model=cfg['model'], max_iters=20000)
     model.local_iter = 16000

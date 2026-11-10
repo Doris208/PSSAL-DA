@@ -184,6 +184,44 @@ class FixedProbeSelectionTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('matplotlib'), 'Matplotlib unavailable')
 class NativeSpatialExportTests(unittest.TestCase):
+    def test_teacher_pseudo_and_gt_labels_use_the_same_rgb_palette(self):
+        from tools import build_doris_mechanism_figures as plot
+        from tools.build_hphy_mechanism_figure import PALETTE
+        labels = np.tile(np.array([0, 1, 2, 3, 4, 255], dtype=np.uint8), (2, 1))
+        original = labels.copy()
+        maps = dict(target_image=np.zeros((2, 6, 3), np.float32),
+                    valid_mask=np.ones((2, 6), bool), pseudo_label=labels,
+                    teacher_label=labels.astype(np.float32), reference_label=labels.copy())
+        maps['metadata'] = np.array(json.dumps(dict(iter=15000, original_shape=[2, 6])))
+        expected = np.full((2, 6, 3), 208, np.uint8)
+        expected[:, :5] = PALETTE
+        with tempfile.TemporaryDirectory(dir=ROOT / 'outputs') as folder:
+            plot.export_spatial_maps(maps, folder, 15000, '{}')
+            for key in ('pseudo_label', 'teacher_label', 'reference_label'):
+                with Image.open(Path(folder) / 'spatial/iter_015000' / (key+'.png')) as png:
+                    self.assertEqual(png.mode, 'RGB', key)
+                    np.testing.assert_array_equal(np.asarray(png), expected)
+        np.testing.assert_array_equal(labels, original)
+
+    def test_old_label_pngs_require_a_new_output_directory(self):
+        from PIL import PngImagePlugin
+        from tools import build_doris_mechanism_figures as plot
+        labels = np.array([[0, 1, 2, 3, 4]], np.uint8)
+        maps = dict(target_image=np.zeros((1, 5, 3), np.float32),
+                    valid_mask=np.ones((1, 5), bool), pseudo_label=labels,
+                    metadata=np.array(json.dumps(dict(original_shape=[1, 5]))))
+        for pixels in (labels, np.zeros((1, 5, 3), np.uint8)):
+            with tempfile.TemporaryDirectory(dir=ROOT / 'outputs') as folder:
+                path = Path(folder) / 'spatial/iter_015000/pseudo_label.png'
+                path.parent.mkdir(parents=True)
+                tags = PngImagePlugin.PngInfo()
+                tags.add_text('Description', '{}')
+                Image.fromarray(pixels).save(path, pnginfo=tags)
+                previous = path.read_bytes()
+                with self.assertRaisesRegex(ValueError, 'new output directory'):
+                    plot.export_spatial_maps(maps, folder, 15000, '{}')
+                self.assertEqual(path.read_bytes(), previous)
+
     def test_spatial_exports_have_exact_pixels_and_fixed_weight_scale(self):
         from tools import build_doris_mechanism_figures as plot
         x = np.tile(np.linspace(0, 1, 37, dtype=np.float32), (23, 1))
@@ -206,7 +244,8 @@ class NativeSpatialExportTests(unittest.TestCase):
                 with Image.open(path) as png:
                     self.assertEqual(png.size, (37, 23))
             with Image.open(spatial / 'pseudo_label.png') as png:
-                np.testing.assert_array_equal(np.array(png), maps['pseudo_label'])
+                self.assertEqual(png.mode, 'RGB')
+                np.testing.assert_array_equal(np.array(png), np.asarray(plot.GOJI_PALETTE)[maps['pseudo_label']])
             with Image.open(spatial / 'w_after_proto.png') as png:
                 rgba = np.array(png)
             expected = plot.plt.get_cmap('viridis')(maps['w_after_proto'], bytes=True)

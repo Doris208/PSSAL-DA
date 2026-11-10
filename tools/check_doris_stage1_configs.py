@@ -55,7 +55,9 @@ def check_config(cfg, expected, doris_full=False):
         assert uda['mechanism_logging'] and uda['fixed_probe_enabled']
         assert uda['mechanism_summary_interval'] == uda['fixed_probe_interval'] == 500
         assert uda['mechanism_sample_interval'] == 100
-        assert uda['fixed_probe_max_samples'] == 1
+        expected_samples = 6 if cfg['name'].startswith('doris_goji26RGB2goji30RGB_') else 1
+        assert uda['fixed_probe_max_samples'] == expected_samples
+        assert len(uda.get('fixed_probe_filenames', [])) == (6 if expected_samples == 6 else 0)
         assert uda['mechanism_save_raw'] and uda['mechanism_make_figures']
         assert not cfg['log_config']['hooks'][0]['paper_names']
         for flag in ('use_struct_gate', 'use_spec_gate', 'use_conf_weight',

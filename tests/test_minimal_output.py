@@ -82,6 +82,19 @@ def dacs_component(original=False):
                  StructPriorConsistencyGate=component(
                      'mmseg/models/uda/struct_prior_gate.py',
                      'StructPriorConsistencyGate', original))
+    if not original:
+        phy_tree = ast.parse((ROOT / 'mmseg/models/uda/phy_reliability.py').read_text())
+        phy_tree.body = [node for node in phy_tree.body
+                         if not isinstance(node, (ast.Import, ast.ImportFrom))]
+        def conv_module(in_channels, out_channels, kernel_size, padding, **kwargs):
+            return torch.nn.Sequential(
+                torch.nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding),
+                torch.nn.BatchNorm2d(out_channels), torch.nn.ReLU())
+        phy_scope = dict(torch=torch, nn=torch.nn, F=torch.nn.functional,
+                         ConvModule=conv_module)
+        exec(compile(phy_tree, 'phy_components', 'exec'), phy_scope)
+        scope.update({name: value for name, value in phy_scope.items()
+                      if name != 'PhyReliabilityHead'})
     edge_tree = ast.parse((ROOT / 'mmseg/models/losses/struct_edge_loss.py').read_text())
     funcs = [n for n in edge_tree.body if isinstance(n, ast.FunctionDef)
              and n.name in ('_as_label', 'label_to_edge')]
@@ -157,6 +170,7 @@ class OutputControlTests(unittest.TestCase):
         hook.local_iter = 0
         hook.debug_img_interval = 1000
         hook.save_class_mix_debug = False
+        hook.doris_process_logging = False
         student = SimpleNamespace(decode_head=SimpleNamespace(debug=True),
                                   generate_pseudo_label=Mock())
         teacher = SimpleNamespace(decode_head=SimpleNamespace(debug=True))

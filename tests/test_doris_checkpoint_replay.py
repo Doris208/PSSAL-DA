@@ -302,6 +302,9 @@ class CheckpointReplayTests(unittest.TestCase):
 
         cfg = Config.wrap(static_config('configs/hrda/doris/goji26RGB2goji30RGB/'
             'doris_goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge.py'))
+        cfg.uda.phy_cfg.update(mode='legacy_binary', phy_min_weight=.82, phy_filter_threshold=.30)
+        cfg.name = cfg.name.replace('_hphy15k', '')
+        cfg.hphy_version = 'legacy_test_fixture'
         observation = sys.modules['mmseg.utils.mechanism']
 
         def render(maps, output, completed, **kwargs):

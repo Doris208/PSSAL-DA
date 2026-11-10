@@ -131,6 +131,8 @@ def main(args):
         cfg.load_from = args.load_from
     if args.resume_from is not None:
         cfg.resume_from = args.resume_from
+    from tools.doris_checkpoint_plan import check_hphy_training_checkpoint
+    check_hphy_training_checkpoint(cfg)
     from tools.doris_checkpoint_plan import configure_checkpoint_policy, check_output_directory
     configure_checkpoint_policy(cfg)
     check_output_directory(cfg)
@@ -192,6 +194,12 @@ def main(args):
     cfg.seed = args.seed
     meta['seed'] = args.seed
     meta['exp_name'] = osp.splitext(osp.basename(args.config))[0]
+    if cfg.get('uda', {}).get('phy_cfg', {}).get('enable', False):
+        meta['head_version'] = cfg.uda.phy_cfg.get('mode', 'legacy_binary')
+        meta['phy_cfg'] = dict(cfg.uda.phy_cfg)
+        if cfg.uda.phy_cfg.get('mode') == 'hierarchical_gv':
+            from mmseg.models.uda.phy_reliability import phy_gate_parameters
+            meta['phy_gate'] = phy_gate_parameters(cfg.uda.phy_cfg)
 
     model = build_train_model(
         cfg, train_cfg=cfg.get('train_cfg'), test_cfg=cfg.get('test_cfg'))

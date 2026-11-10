@@ -50,7 +50,8 @@ def train_segmentor(model,
                     meta=None):
     """Launch segmentor training."""
     logger = get_root_logger(cfg.log_level)
-    from tools.doris_checkpoint_plan import configure_checkpoint_policy
+    from tools.doris_checkpoint_plan import configure_checkpoint_policy, check_hphy_training_checkpoint
+    check_hphy_training_checkpoint(cfg)
     doris_checkpoints = configure_checkpoint_policy(cfg)
 
     # prepare data loaders

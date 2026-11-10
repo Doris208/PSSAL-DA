@@ -1,0 +1,2 @@
+scripts/run_doris_tableiv_26rgb_to_30rgb_hphy15k.sh text eol=lf
+scripts/run_hphy_mechanism_26rgb2_30rgb.sh text eol=lf

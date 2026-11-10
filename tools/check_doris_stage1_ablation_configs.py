@@ -80,8 +80,10 @@ def audit(reader):
                 assert phy.phy_target_supervision_mode == 'balanced_high_conf'
                 assert (phy.phy_pos_weight, phy.phy_neg_weight, phy.tau_conf_phy) == (.5, .5, .968)
                 assert (phy.lambda_phy_src, phy.lambda_phy_tgt) == (.08, .008)
-                assert (phy.phy_min_weight, phy.phy_filter_threshold, phy.phy_filter_mode) == (.82, .30, 'soft')
-                assert (phy.phy_warmup_iters, phy.phy_rampup_iters, phy.detach_target_gate) == (6000, 4000, True)
+                assert phy.mode == 'hierarchical_gv'
+                assert (phy.phy_min_weight, phy.phy_filter_threshold, phy.detach_target_gate) == (.75, None, True)
+                assert (phy.phy_gate_schedule, phy.phy_gate_initial_strength,
+                        phy.phy_gate_full_iter) == ('early_nonzero_linear', .10, 4000)
             if flags[1]:
                 assert cfg.uda.struct_cfg.fusion_mode == 'doris_confidence_guided'
             if flags[2]:
@@ -90,15 +92,21 @@ def audit(reader):
             if flags[3]:
                 assert cfg.uda.struct_edge_cfg.edge_fusion_mode == 'doris_reliable'
                 assert cfg.uda.struct_edge_cfg.pair_response_mode == 'valid_boundary_only'
-            assert cfg.work_dir == '/root/shared-nvme/work_dirs/doris_stage1/' + direction + '/' + name[6:], name
+            if flags[0]:
+                assert cfg.work_dir == ('/root/shared-nvme/work_dirs/doris_hphy_early4k/' +
+                                       direction + '/' + name[6:] + '_hphy_early4k'), name
+            else:
+                assert cfg.work_dir == '/root/shared-nvme/work_dirs/doris_stage1/' + direction + '/' + name[6:], name
             assert cfg.work_dir not in outputs, (name, 'duplicate default work_dir')
             outputs.add(cfg.work_dir)
             experiment = name[6:]
             commands.append(['python', 'tools/train.py', relative, '--work-dir',
                              '/root/shared-nvme/work_dirs/doris_stage1/' + direction + '/' + experiment])
             rows.append((name, flags))
-    script = (ROOT / 'train_doris_mitb5_stage1_ablations_20k.sh').read_bytes()
-    assert b'\r' not in script, 'Batch script must use LF line endings'
+    # Preserve the archival launcher identity. Fresh 4K experiments use scripts/run_doris_tableiv_*.
+    script = (ROOT / 'train_doris_mitb5_stage1_ablations_20k.sh').read_text(encoding='utf-8').encode('utf-8')
+    for launcher in (ROOT / 'scripts').glob('*.sh'):
+        assert b'\r' not in launcher.read_bytes(), (launcher, 'Active launchers require LF line endings')
     assert b'set -e\n' in script
     assert b'$RUN_ROOT' not in script, 'Each command must use a standalone absolute work_dir'
     actual_commands = [shlex.split(line) for line in script.decode().splitlines()

@@ -35,7 +35,8 @@ from mmseg.models.uda.masking_consistency_module import \
     MaskingConsistencyModule
 from mmseg.models.uda.uda_decorator import UDADecorator, get_module
 from mmseg.models.uda.phy_reliability import (PhyReliabilityHead,
-                                              masked_bce_loss, target_phy_loss)
+    HierarchicalPhyReliabilityHead, hierarchical_source_loss,
+    hierarchical_phy_gate, phy_gate_parameters, validate_phy_checkpoint, masked_bce_loss, target_phy_loss)
 from mmseg.models.uda.proto_gate import ProtoGate
 from mmseg.models.uda.struct_prior_gate import StructPriorConsistencyGate
 from mmseg.models.losses.struct_edge_loss import label_to_edge
@@ -193,7 +194,13 @@ class DACS(UDADecorator):
 
         if self.enable_phy:
             phy_head_cfg = deepcopy(self.phy_cfg.get('phy_head', {}))
-            self.phy_head = PhyReliabilityHead(**phy_head_cfg)
+            self.phy_mode = self.phy_cfg.get('mode', 'legacy_binary')
+            if self.phy_mode not in ('legacy_binary', 'hierarchical_gv'):
+                raise ValueError('Unknown physiology head mode: ' + self.phy_mode)
+            head = (HierarchicalPhyReliabilityHead if self.phy_mode == 'hierarchical_gv'
+                    else PhyReliabilityHead)
+            self.phy_head = head(**phy_head_cfg)
+            self.beta_gv = self.phy_cfg.get('beta_gv', 1.0)
             self.phy_positive_classes = self.phy_cfg.get(
                 'phy_positive_classes', [0, 1])
             self.phy_apply_to_classes = self.phy_cfg.get(
@@ -214,8 +221,18 @@ class DACS(UDADecorator):
             self.phy_filter_mode = self.phy_cfg.get('phy_filter_mode', 'soft')
             self.phy_warmup_iters = self.phy_cfg.get('phy_warmup_iters', 1000)
             self.phy_rampup_iters = self.phy_cfg.get('phy_rampup_iters', 0)
+            self.phy_gate_params = phy_gate_parameters(self.phy_cfg)
             self.detach_target_gate = self.phy_cfg.get(
                 'detach_target_gate', True)
+            if self.phy_mode == 'hierarchical_gv':
+                if (self.beta_gv < 0 or not self.detach_target_gate or
+                        self.phy_filter_threshold is not None or
+                        not 0 < self.phy_min_weight <= 1 or
+                        self.phy_cfg.get('lambda_phy_tgt_gv', 0.0) != 0 or
+                        self.phy_target_supervision_mode != 'balanced_high_conf' or
+                        list(self.phy_positive_classes) != [0, 1] or
+                        list(self.phy_apply_to_classes) != [0, 1]):
+                    raise ValueError('Invalid H-Phy V1 loss/gate configuration')
             self.save_phy_debug = self.log_debug_stats and self.phy_cfg.get(
                 'save_phy_debug', False)
             self.phy_debug_interval = self.phy_cfg.get(
@@ -474,7 +491,10 @@ class DACS(UDADecorator):
         log_vars['loss'] = sum(
             value * (self.lambda_phy_src if name == 'loss_phy_src' else 1.0)
             for name, value in log_vars.items()
-            if 'loss' in name and name != 'loss' and not name.startswith('doris.'))
+            if 'loss' in name and name != 'loss' and not name.startswith('doris.')
+            and name not in ('loss_phy_src_veg_raw', 'loss_phy_src_gv_raw',
+                             'loss_phy_src_raw', 'loss_phy_src_weighted', 'loss_phy_tgt_veg_weighted',
+                             'loss_phy_tgt_gv_weighted'))
         if observation_start is not None:
             log_vars['train_iter_time'] = time.perf_counter() - observation_start
 
@@ -636,8 +656,34 @@ class DACS(UDADecorator):
         class_tensor = torch.tensor(classes, device=label.device)
         return torch.any(label[..., None] == class_tensor, dim=-1)
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        if self.enable_phy and (self.phy_mode == 'hierarchical_gv' or
+                               any(key.startswith((prefix + 'phy_head.encoder.',
+                                                   prefix + 'phy_head.veg_head.',
+                                                   prefix + 'phy_head.gv_head.'))
+                                   for key in state_dict)):
+            validate_phy_checkpoint(self.phy_mode, state_dict, prefix + 'phy_head.')
+            # MMCV's non-strict loader otherwise only warns on incomplete heads.
+            for key, value in self.phy_head.state_dict().items():
+                saved = state_dict.get(prefix + 'phy_head.' + key)
+                if saved is None or saved.shape != value.shape:
+                    raise RuntimeError('Incomplete physiology checkpoint tensor: ' + key)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                      missing_keys, unexpected_keys, error_msgs)
+
     def _compute_phy_src_loss(self, source_vi_img, gt_semantic_seg, log_vars):
         r_phy_src = self.phy_head(source_vi_img.float())
+        if self.phy_mode == 'hierarchical_gv':
+            raw, parts = hierarchical_source_loss(r_phy_src, gt_semantic_seg, self.beta_gv)
+            log_vars.update(loss_phy_src_veg_raw=parts['veg'].detach().item(),
+                            loss_phy_src_gv_raw=parts['gv'].detach().item(),
+                            loss_phy_src_raw=raw.detach().item(),
+                            loss_phy_src_weighted=(self.lambda_phy_src * raw).detach().item())
+            log_vars['loss_phy_src'] = log_vars['loss_phy_src_raw']
+            for name in ('valid_count', 'goji_count', 'other_veg_count'):
+                log_vars['hphy_src_' + name] = parts[name].item()
+            return r_phy_src, self.lambda_phy_src * raw
         gt = gt_semantic_seg.squeeze(1)
         target = self._class_mask(gt, self.phy_positive_classes).unsqueeze(1)
         valid = gt.ne(255).unsqueeze(1)
@@ -658,8 +704,40 @@ class DACS(UDADecorator):
         return r_phy_src, self.lambda_phy_src * loss_phy_src
 
     def _apply_phy_gate(self, target_vi_img, pseudo_label, pseudo_weight,
-                        log_vars):
+                        log_vars, valid_mask=None):
         r_phy_tgt = self.phy_head(target_vi_img.float())
+        if self.phy_mode == 'hierarchical_gv':
+            if r_phy_tgt['r_veg'].shape[-2:] != pseudo_label.shape[-2:]:
+                raise ValueError('H-Phy VI and teacher labels must share the pixel grid')
+            details = hierarchical_phy_gate(
+                r_phy_tgt, pseudo_label, pseudo_weight, self.local_iter,
+                min_weight=self.phy_min_weight, enabled=self.use_target_gate,
+                valid_mask=valid_mask, return_details=True, **self.phy_gate_params)
+            after, gate, agreement = details['W_after'], details['G_phy'], details['S_phy']
+            r_phy_tgt.update(s_phy_class_agreement=agreement.unsqueeze(1),
+                             g_phy=gate.unsqueeze(1), a_phy=details['A_phy'].unsqueeze(1),
+                             w_before_phy=details['W_before'].detach().clone().unsqueeze(1),
+                             w_after_phy=after.detach().clone().unsqueeze(1))
+            spatial = (pseudo_weight.gt(0) if valid_mask is None
+                       else valid_mask.reshape_as(pseudo_label).gt(0))
+            valid = spatial & pseudo_label.ge(0) & pseudo_label.lt(self.num_classes)
+            for cls, name in ((0, 'goji'), (1, 'vegetation')):
+                mask = valid & pseudo_label.eq(cls)
+                log_vars['hphy_' + name + '_pseudo_ratio'] = (
+                    mask.sum().float() / valid.sum().clamp_min(1)).item()
+                for key, value in (('agreement', agreement), ('gate', gate)):
+                    log_vars['hphy_' + name + '_' + key + '_mean'] = (
+                        value[mask].mean().item() if mask.any() else 0.0)
+            supported = valid & pseudo_weight.gt(0)
+            active = supported & self._class_mask(pseudo_label, [0, 1]) & gate.lt(1)
+            log_vars.update(phy_gate_iter=self.local_iter, phy_gate_rho=details['rho'],
+                phy_gate_active_ratio=(active.sum().float() / supported.sum().clamp_min(1)).item(),
+                phy_S_mean_active=agreement[active].mean().item() if active.any() else 0.0,
+                phy_A_mean_active=details['A_phy'][active].mean().item() if active.any() else 0.0,
+                phy_A_max_active=details['A_phy'][active].max().item() if active.any() else 0.0)
+            log_vars['hphy_attenuation_mean_valid_weight'] = (
+                (1 - gate)[supported].mean().item() if supported.any() else 0.0)
+            return r_phy_tgt, after, gate
         if r_phy_tgt.shape[-2:] != pseudo_label.shape[-2:]:
             r_phy_tgt = F.interpolate(
                 r_phy_tgt,
@@ -771,7 +849,12 @@ class DACS(UDADecorator):
             self._save_teacher_confidence_map(
                 confidence_map[i].detach().cpu().numpy(),
                 prefix + '_conf.png')
-            self._save_phy_map(r_phy_tgt[i, 0], prefix + '_r_phy.png')
+            if isinstance(r_phy_tgt, dict):
+                for name, value in r_phy_tgt.items():
+                    if not name.startswith('logit_'):
+                        self._save_phy_map(value[i, 0], prefix + '_' + name + '.png')
+            else:
+                self._save_phy_map(r_phy_tgt[i, 0], prefix + '_r_phy.png')
             self._save_phy_map(pseudo_weight[i], prefix + '_weight.png')
 
     def _log_struct_debug(self, struct_debug, log_vars):
@@ -951,8 +1034,11 @@ class DACS(UDADecorator):
                 confidence_map[i].detach().cpu().numpy(),
                 prefix + '_target_teacher_confidence.png')
             if r_phy_tgt is not None:
-                self._save_phy_map(r_phy_tgt[i, 0],
-                                   prefix + '_target_R_phy.png')
+                response = (r_phy_tgt['s_phy_class_agreement']
+                            if isinstance(r_phy_tgt, dict) else r_phy_tgt)
+                self._save_phy_map(response[i, 0],
+                                   prefix + ('_target_S_phy.png'
+                                             if isinstance(r_phy_tgt, dict) else '_target_R_phy.png'))
             if struct_debug is not None:
                 self._save_phy_map(struct_debug['R_struct'][i],
                                    prefix + '_target_R_struct.png')
@@ -1497,7 +1583,11 @@ class DACS(UDADecorator):
         if w_t_phy is not None:
             log_vars['doris.mparc.w_t_phy_mean'] = mean_valid(w_t_phy)
         if r_phy is not None:
-            log_vars['doris.mparc.r_phy_mean'] = mean_valid(r_phy.detach())
+            if isinstance(r_phy, dict):
+                log_vars['doris.mparc.s_phy_class_agreement_mean'] = mean_valid(
+                    r_phy['s_phy_class_agreement'])
+            else:
+                log_vars['doris.mparc.r_phy_mean'] = mean_valid(r_phy.detach())
         if struct_debug is not None:
             for name, value in (('r_conf', confidence),
                                 ('r_loc', struct_debug.get('R_continuity')),
@@ -2039,7 +2129,8 @@ class DACS(UDADecorator):
             phy_input_weight = (original_pseudo_weight.clone()
                                 if self.enable_joint_gate else pseudo_weight)
             r_phy_tgt, phy_pseudo_weight, phy_weight = self._apply_phy_gate(
-                target_vi_img, pseudo_label, phy_input_weight, log_vars)
+                target_vi_img, pseudo_label, phy_input_weight, log_vars,
+                valid_mask=self._doris_target_valid_mask(pseudo_label, valid_pseudo_mask))
             if not self.enable_joint_gate:
                 pseudo_weight = phy_pseudo_weight
         struct_debug = None
@@ -2286,6 +2377,9 @@ class DACS(UDADecorator):
                 pos_weight=self.phy_pos_weight, neg_weight=self.phy_neg_weight)
             loss_phy_tgt = self.lambda_phy_tgt * loss_phy_tgt
             log_vars['loss_phy_tgt'] = loss_phy_tgt.item()
+            if self.phy_mode == 'hierarchical_gv':
+                log_vars['loss_phy_tgt_veg_weighted'] = log_vars['loss_phy_tgt']
+                log_vars['loss_phy_tgt_gv_weighted'] = 0.0
             if self._mechanism_sample_enabled() and (
                     self.mechanism_cfg['output_mode'] != 'branches' or self.mechanism_cfg['detailed_output']):
                 record = self.mechanism_records[-1]

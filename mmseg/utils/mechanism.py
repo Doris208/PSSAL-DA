@@ -91,6 +91,10 @@ def module_states(model):
                     model.struct_gate.struct_rampup_iters)
             states[name] = ('warmup' if model.local_iter <= start else
                             'ramping' if model.local_iter < start + ramp else 'active')
+    if flags['phy'] and getattr(model, 'phy_mode', 'legacy_binary') == 'hierarchical_gv':
+        from mmseg.models.uda.phy_reliability import phy_gate_strength
+        rho = phy_gate_strength(model.local_iter, **model.phy_gate_params)
+        states['phy'] = ('warmup' if rho == 0 else 'ramping' if rho < 1 else 'active')
     if flags['proto']:
         gate = model.proto_gate
         ready = int(gate.valid_proto.sum())
@@ -116,7 +120,16 @@ def probe_arrays(model, image, vi, metas, spatial_valid):
         weight = torch.ones(label.shape, device=image.device) * ratio * valid
         maps = dict(w_conf=confidence, w_base=weight, pseudo_label=label, valid_mask=valid)
         if flags['phy']:
-            response, weight, _ = model._apply_phy_gate(vi, label, weight, {})
+            response, weight, gate = model._apply_phy_gate(vi, label, weight, {}, valid_mask=valid)
+            if isinstance(response, dict):
+                top_two = probabilities.topk(2, dim=1).values
+                maps.update({key: value[:, 0] for key, value in response.items()
+                             if not key.startswith('logit_')})
+                maps.update(attenuation_phy=response['a_phy'][:, 0],
+                            teacher_label=label, teacher_confidence=confidence,
+                            teacher_top2_margin=top_two[:, 0] - top_two[:, 1],
+                            vi_ndvi=vi[:, 0], vi_ndre=vi[:, 1], vi_cire=vi[:, 2])
+                response = response['r_veg']
             maps.update(r_phy=response[:, 0], w_t_phy=weight,
                         m_phy=model._class_mask(label, model.phy_apply_to_classes),
                         delta_w_phy=weight - maps['w_base'])
@@ -173,6 +186,11 @@ def training_record(model, confidence, label, w_t_ps, final, valid, structural,
                     r_phy=None, edge_components=None, log_vars=None):
     """Sample enabled modules from actual pre-ClassMix tensors, without a forward."""
     flags, states = module_flags(model), module_states(model)
+    if isinstance(r_phy, dict):
+        hphy = r_phy
+        r_phy = r_phy['r_veg']
+    else:
+        hphy = None
     branch_mode = model.mechanism_cfg.get('output_mode', 'branches') == 'branches'
     valid = valid[:, 0] if valid.dim() == 4 else valid
     count = int(valid.sum())
@@ -227,7 +245,10 @@ def training_record(model, confidence, label, w_t_ps, final, valid, structural,
                 response.detach()[mask].float().sum().item(), int(mask.sum()))
         for name, pair in getattr(model, 'mechanism_phy_source', {}).items():
             phy_groups['source_' + name] = pair
-        phy_count = int((valid & vegetation).sum())
+        count_mask = valid & vegetation
+        if hphy is not None and w_base is not None:
+            count_mask = count_mask & w_base.gt(0)
+        phy_count = int(count_mask.sum())
         if w_base is not None:
             downweighted = int((valid & vegetation & w_t_phy.detach().lt(w_base)).sum())
         if log_vars is not None and 'loss_phy_src' in log_vars:
@@ -243,7 +264,13 @@ def training_record(model, confidence, label, w_t_ps, final, valid, structural,
             statistic('phy_response_mean_valid', r_phy, mask)
             statistic('phy_weight_before_mean', w_base, mask)
             statistic('phy_weight_after_mean', w_t_phy, mask)
-            branch['phy_downweight_ratio'] = (int((mask & w_t_phy.detach().lt(w_base)).sum()), int(mask.sum()))
+            ratio_mask = mask if hphy is None else mask & w_base.gt(0)
+            branch['phy_downweight_ratio'] = (int((ratio_mask & w_t_phy.detach().lt(w_base)).sum()), int(ratio_mask.sum()))
+            if hphy is not None:
+                supported = mask & w_base.gt(0)
+                for name in ('r_veg', 'q_goji_given_veg', 's_phy_class_agreement', 'g_phy'):
+                    statistic('hphy_' + name + '_mean', hphy[name], supported)
+                statistic('hphy_attenuation_mean', 1 - hphy['g_phy'], supported)
         if flags['struct']:
             mask = valid & model._class_mask(label, model.struct_gate.struct_positive_classes)
             statistic('struct_response_mean_valid', structural['R_struct'], mask)
@@ -356,7 +383,7 @@ def deterministic_probe_config(cfg, allow_daformer=False):
     architecture = r'(?:hrda_?3vi|daformer_3vi|daformer_r101_no3vi)' if allow_daformer else r'hrda_?3vi'
     match = re.fullmatch(r'(?:doris_)?(goji\w+2goji\w+)_' + architecture +
                         r'(?:_phy_gate|_struct_gate|_phy_struct_gate|_ps_proto|_struct_edge|'
-                        r'_pbcr|_proto_struct_edge)?', cfg.get('name', ''))
+                        r'_pbcr|_proto_struct_edge)?(?:_hphy15k|_hphy_early3k|_hphy_early4k)?', cfg.get('name', ''))
     if match and match[1] in FIXED_TARGET_PROBES:
         direction = match[1]
         domain, view, filename = FIXED_TARGET_PROBES[direction]
@@ -422,6 +449,33 @@ def load_probe_sample(probe_cfg, model):
     return sample, description
 
 
+def hphy_gate_metadata(model, score, gate, weight, valid, label):
+    """Summarize the actual positive-weight physiology scope on the full grid."""
+    from mmseg.models.uda.phy_reliability import phy_gate_strength
+    supported = valid.astype(bool) & (weight > 0)
+    active = supported & np.isin(label, [0, 1]) & (gate < 1)
+    attenuation = 1 - gate
+    params = model.phy_gate_params
+    rho = phy_gate_strength(model.local_iter, **params) if model.use_target_gate else 0.
+    reason = (None if active.any() else
+              'target gate disabled' if not model.use_target_gate else
+              'no valid positive base weights' if not supported.any() else
+              'no Teacher Goji/Vegetation pixels with positive base weight' if not
+              (supported & np.isin(label, [0, 1])).any() else
+              'zero schedule strength or neutral physiology agreement')
+    return dict(gate_schedule=params['schedule'],
+        gate_initial_strength=params.get('initial_strength'),
+        gate_full_iter=params.get('full_iter'), gate_rho_at_checkpoint=rho,
+        gate_min_weight=model.phy_min_weight,
+        gate_active_pixel_ratio=float(active.sum() / max(1, supported.sum())),
+        gate_active_pixel_count=int(active.sum()),
+        gate_ratio_denominator='valid pixels with W_before > 0',
+        mean_S_phy_on_active_pixels=float(score[active].mean()) if active.any() else None,
+        mean_A_phy_on_active_pixels=float(attenuation[active].mean()) if active.any() else None,
+        max_A_phy_on_active_pixels=float(attenuation[active].max()) if active.any() else None,
+        gate_empty_reason=reason)
+
+
 def branch_probe_payload(model, image, vi, metas, valid, metadata, unavailable_weights=()):
     """Capture the same enabled branch tensors for online collection and replay."""
     maps = probe_arrays(model, image, vi, metas, valid)
@@ -451,6 +505,28 @@ def branch_probe_payload(model, image, vi, metas, valid, metadata, unavailable_w
             'delta_w_proto','teacher_pseudo_boundary','r_edge','edge_supervision')
     payload = {key:maps[key] for key in kept if key in maps}
     if 'r_phy' in maps:
+        metadata['head_version'] = getattr(model, 'phy_mode', 'legacy_binary')
+    if 'r_veg' in maps:
+        for key in ('r_veg', 'q_goji_given_veg', 'p_goji', 'p_other_veg', 'p_nonveg',
+                    's_phy_class_agreement', 'g_phy', 'a_phy', 'attenuation_phy',
+                    'teacher_label', 'teacher_confidence', 'teacher_top2_margin',
+                    'vi_ndvi', 'vi_ndre', 'vi_cire'):
+            payload[key] = maps[key]
+        metadata['r_phy_alias'] = 'r_veg; class-conditioned gating uses s_phy_class_agreement'
+        metadata['hphy_cfg'] = dict(model.phy_cfg)
+        metadata.update(hphy_gate_metadata(model, maps['s_phy_class_agreement'],
+            maps['g_phy'], maps['w_before_phy'], maps['valid_mask'], maps['pseudo_label']))
+        code_root = Path(__file__).resolve().parents[2]
+        metadata.setdefault('source_sha256', {}).update({
+            name: hashlib.sha256((code_root / name).read_bytes()).hexdigest()
+            for name in ('mmseg/models/uda/phy_reliability.py', 'mmseg/models/uda/dacs.py')})
+        metadata.update(
+            label_mapping={str(i): name for i, name in enumerate(model.class_names)},
+            ignore_index=255, vi_order=['NDVI', 'NDRE', 'CIRE'],
+            work_dir=getattr(model, 'train_cfg', {}).get('work_dir'),
+            prediction_identity='EMA Teacher; Student validation is a separate output',
+            relative_attenuation_statistics='valid pixels with w_before_phy > 0')
+    if 'r_phy' in maps:
         metadata['phy_weight_definitions'] = dict(
             w_conf='EMA Teacher maximum softmax probability at each pixel',
             w_before_phy='DACS image-level high-confidence fraction times valid mask',
@@ -471,7 +547,7 @@ def branch_probe_payload(model, image, vi, metas, valid, metadata, unavailable_w
 class MechanismCollector:
     """Invoked by the existing PrecisionLoggerHook, not a second training Hook."""
 
-    def __init__(self, runner, model):
+    def __init__(self, runner, model, probe_filename=None, analysis_root=None):
         self.model, self.runner = model, runner
         self.modules = module_flags(model)
         if not any(self.modules.values()):
@@ -485,12 +561,13 @@ class MechanismCollector:
             raise ValueError('Automatic summary figures require mechanism_save_raw=True')
         if self.cfg.get('online_plot', False) and not (self.cfg['probe_enabled'] and self.cfg['save_raw']):
             raise ValueError('Online PNGs require fixed_probe_enabled and mechanism_save_raw')
-        self.base_root = (Path(runner.work_dir) / 'analysis').resolve()
+        self.base_root = (Path(analysis_root) if analysis_root is not None else
+                          Path(runner.work_dir) / 'analysis').resolve()
         self.root = self.base_root
         pointer = self.base_root / 'active_resume.json'
         if pointer.exists():
             selected = (self.base_root / json.loads(pointer.read_text(encoding='utf-8'))['path']).resolve()
-            if self.base_root.resolve() not in selected.parents or not selected.is_dir():
+            if (selected != self.base_root and self.base_root not in selected.parents) or not selected.is_dir():
                 raise ValueError('Invalid active resume analysis directory')
             self.root = selected
         previous = self.root / 'manifest.json'
@@ -503,6 +580,7 @@ class MechanismCollector:
         self.pending = []
         self.window_start = runner.iter
         self.sample = None
+        self.extra_probes = []
         effective = getattr(runner, 'mechanism_config', None)
         if effective is None:
             from mmcv import Config
@@ -518,20 +596,34 @@ class MechanismCollector:
         # Output-only additions must not invalidate existing schema-4 runs on resume.
         for key in ('mechanism_online_plot', 'mechanism_strict'):
             identity.get('uda', {}).pop(key, None)
+        if identity.get('uda', {}).pop('fixed_probe_filenames', None) is not None:
+            identity['uda']['fixed_probe_max_samples'] = 1
         identity.get('checkpoint_config', {}).pop('meta', None)
         self.identity = json_digest(identity)
         self.probe_cfg = deterministic_probe_config(config)
+        if probe_filename is not None:
+            self.probe_cfg.update(filename=probe_filename, expected_path=str((
+                Path(self.probe_cfg['dataset']['data_root']) /
+                self.probe_cfg['dataset']['img_dir'] / probe_filename).resolve()))
         if self.probe_cfg.get('filename'):
             current_sample = self.root / 'fixed_probe/sample_manifest.json'
             old = json.loads(current_sample.read_text(encoding='utf-8')) if current_sample.exists() else {}
-            if any(old.get(key) != self.probe_cfg[key] for key in
+            if probe_filename is None and any(old.get(key) != self.probe_cfg[key] for key in
                    ('direction', 'filename', 'selection_policy')):
                 sample_tag = self.probe_cfg['direction'] + '__' + Path(self.probe_cfg['filename']).stem + '_native_v1'
                 self.root = self.base_root / 'fixed_samples' / sample_tag
             if config['model'].get('feature_scale') == 'all':
                 raise ValueError('Native fixed probes require full-image prototype features, not cached training crops')
-        if config['uda'].get('fixed_probe_max_samples', 1) != 1:
-            raise ValueError('This fixed probe intentionally supports exactly one sample')
+        filenames = config['uda'].get('fixed_probe_filenames', [])
+        if probe_filename is None and filenames:
+            if (filenames[0] != self.probe_cfg.get('filename') or
+                    len(set(filenames)) != len(filenames) or
+                    len(filenames) > config['uda'].get('fixed_probe_max_samples', 1) or
+                    any(Path(name).name != name or Path(name).suffix.lower() != '.tif' for name in filenames)):
+                raise ValueError('Fixed probe filenames must be unique TIFF basenames, start with the '
+                                 'original fixed sample, and fit fixed_probe_max_samples')
+        elif probe_filename is None and config['uda'].get('fixed_probe_max_samples', 1) != 1:
+            raise ValueError('Multiple fixed probes require explicit fixed_probe_filenames')
         self.manifest = dict(schema_version=4 if self.output_mode == 'branches' else 3 if self.physiology else 2,
             output_mode=self.output_mode, detailed_output=self.cfg.get('detailed_output', False),
             experiment_name=config.get('name', Path(runner.work_dir).name),
@@ -548,6 +640,8 @@ class MechanismCollector:
             summary_interval=self.cfg['summary_interval'], probe_interval=self.cfg['probe_interval'],
             proto_weight_start=model.proto_gate.weight_start if self.modules['proto'] else None,
             proto_target_update_start=model.proto_gate.target_update_start if self.modules['proto'] else None)
+        if self.modules['phy'] and getattr(model, 'phy_mode', 'legacy_binary') == 'hierarchical_gv':
+            self.manifest['phy_gate'] = dict(model.phy_gate_params)
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / 'manifest.json'
         if path.exists():
@@ -567,6 +661,11 @@ class MechanismCollector:
         self.write_definitions()
         if self.cfg['probe_enabled']:
             self.load_sample()
+            if probe_filename is None:
+                for filename in filenames[1:]:
+                    sample_tag = self.probe_cfg['direction'] + '__' + Path(filename).stem + '_native_v1'
+                    self.extra_probes.append(MechanismCollector(runner, model, filename,
+                        self.base_root / 'fixed_samples' / sample_tag))
         if self.probe_cfg.get('filename'):
             pointer = self.base_root / 'active_resume.json'
             temporary = pointer.with_suffix('.json.tmp')
@@ -723,6 +822,21 @@ CSV source response groups use source GT; target groups use Teacher labels, neve
 phy_downweight_ratio=actually_downweighted_vegetation_count/valid_Teacher_vegetation_count.
 phy loss columns are sampled-batch scalar means (source raw, target lambda-weighted), not new train losses.
 '''
+        if getattr(self.model, 'phy_mode', None) == 'hierarchical_gv':
+            mapping = '''# H-Phy V1 formula code mapping
+VI encoder -> r_veg and q_goji_given_veg, each independently sigmoid activated.
+p_goji=r_veg*q_goji_given_veg; p_other_veg=r_veg*(1-q_goji_given_veg); p_nonveg=1-r_veg.
+s_phy_class_agreement selects p_goji or p_other_veg by Teacher argmax.
+g_phy=1-rho*(1-phy_min_weight)*(1-s_phy_class_agreement) on valid vegetation predictions.
+w_after_phy=w_before_phy*g_phy; attenuation_phy=1-g_phy, restricted to positive base weights.
+Source raw=(BCE_veg+beta_gv*balanced_BCE_gv)/(1+beta_gv); weighted=lambda_phy_src*raw.
+Target weighted=lambda_phy_tgt*balanced_BCEWithLogits_veg; direct target GV loss is zero.
+Source loss_phy_src_*_raw and loss_phy_src_weighted have explicit units. Legacy loss_phy_src is raw.
+Target GT is available only to the independent offline reference analyzer.
+r_phy is a compatibility alias of r_veg. H-Phy figures use s_phy_class_agreement and attenuation_phy.
+'''
+            mapping += '\nGate strength uses phy_gate_strength(local_iter, **phy_gate_params).\n'
+            mapping += 'Effective saved schedule parameters = ' + json.dumps(self.model.phy_gate_params, sort_keys=True) + '\n'
         for name, content in (('metric_definitions.md', metric), ('formula_code_mapping.md', mapping)):
             path = reports / name
             if (self.output_mode == 'detailed' or self.cfg.get('detailed_output', False)) and not path.exists():
@@ -829,6 +943,13 @@ Full images explain cooperation; single-branch images can explain isolated effec
         row['proto_selected_count'] = counts['joint_selected_count']
         row['proto_updated_count'] = counts['updated_count']
         row['tau_proto'] = last['tau_proto'] if flags['proto'] else 'NA'
+        if getattr(self.model, 'phy_mode', None) == 'hierarchical_gv':
+            row['head_version'] = 'hierarchical_gv'
+            for key in ('r_veg', 'q_goji_given_veg', 's_phy_class_agreement', 'g_phy', 'attenuation'):
+                name = 'hphy_' + key + '_mean'
+                terms = [s['branch'][name] for s in samples if name in s['branch']]
+                count = sum(term[1] for term in terms)
+                row[name] = sum(term[0] for term in terms) / count if count else 'NA'
         append_unique_csv(self.root/'metrics/branch_mechanism_500.csv', [row], ['iter'])
         if self.cfg.get('detailed_output', False):
             self.summarize_detailed(completed)
@@ -909,6 +1030,8 @@ Full images explain cooperation; single-branch images can explain isolated effec
         try:
             with readonly_probe(self.model):
                 self._snapshot(completed)
+                for probe in getattr(self, 'extra_probes', ()):
+                    probe.snapshot(completed)
         except Exception as error:
             if self.cfg.get('output_mode', 'branches') != 'branches':
                 raise
@@ -952,6 +1075,8 @@ Full images explain cooperation; single-branch images can explain isolated effec
             metadata['edge_pair_prior_ready'] = bool(self.model.struct_edge_pair_prior_ready)
         compact = getattr(self, 'physiology', self.cfg.get('physiology', False))
         metadata['physiology_compact'] = compact
+        if metadata['modules']['phy']:
+            metadata['head_version'] = getattr(self.model, 'phy_mode', 'legacy_binary')
         generic = not compact or any(metadata['modules'][k] for k in ('struct', 'proto', 'edge'))
         phy_path = self.root / 'physiology/arrays' / ('iter_{:06d}_phy.npz'.format(completed))
         required = ([path] if generic else []) + ([phy_path] if compact else [])
@@ -981,6 +1106,10 @@ Full images explain cooperation; single-branch images can explain isolated effec
                     phy = {k: maps[k] for k in ('r_phy', 'm_phy', 'w_t_phy', 'delta_w_phy',
                            'valid_mask', 'target_image', 'metadata', 'rule_iter')}
                     phy['w_before_phy'] = maps['w_base']
+                    if 'r_veg' in maps:
+                        phy.update({k: v for k, v in maps.items() if k not in
+                                    ('target_image', 'metadata')})
+                        phy['w_after_phy'] = maps['w_t_phy']
                     payloads.append((phy_path, phy))
                 for saved_path, payload in payloads:
                     if saved_path.exists():
@@ -1024,6 +1153,7 @@ Full images explain cooperation; single-branch images can explain isolated effec
             data_source='fixed_probe_recomputed', output_mode='branches',
             input_view=self.probe_cfg.get('channel_order', [])[:3])
         metadata.update(capture_mode='online_after_train_iter', checkpoint=None,
+            git_commit=self.manifest.get('git_commit'),
             target_path=sample.get('target_path', metas[0]['filename']),
             direction=self.probe_cfg.get('direction'),
             original_shape=sample.get('original_shape', list(image.shape[-2:])),
@@ -1109,6 +1239,9 @@ Full images explain cooperation; single-branch images can explain isolated effec
             figures=[p.relative_to(self.root).as_posix() for p in figures],
             spatial_maps=('fixed_probe/snapshots/spatial/iter_{:06d}'.format(completed)
                           if self.cfg.get('online_plot', False) else None),
+            native_panels={name: 'fixed_probe/snapshots/{}/iter_{:06d}'.format(name, completed)
+                           for name in ('full256', 'center196') if (self.root /
+                               'fixed_probe/snapshots' / name / 'iter_{:06d}'.format(completed)).is_dir()},
             mechanism_probe_time=elapsed, array_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
         self.runner.logger.info('Mechanism snapshot completed iter=%d: %.3fs; NPZ=%s; PNG=%s',
                                 completed, elapsed, str(path), ', '.join(str(p) for p in figures))

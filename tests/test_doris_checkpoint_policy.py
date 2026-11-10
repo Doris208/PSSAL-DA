@@ -52,7 +52,7 @@ class PlanTests(unittest.TestCase):
                 ('goji26IRRG2goji30RGB',4000,8000),('goji30IRRG2goji26IRRG',3000,6000)]:
             for path in (ROOT/'configs/hrda/doris'/direction).glob('*.py'):
                 cfg=static_config(path.relative_to(ROOT).as_posix()); plan=checkpoint_plan(cfg)
-                self.assertEqual(plan['periodic'],list(range(2000,20001,2000)))
+                self.assertEqual(plan['periodic'],list(range(2000,15000,2000)) + [15000])
                 self.assertEqual(len(plan['all_iterations']),len(set(plan['all_iterations'])))
                 self.assertFalse(any(e['branch']=='edge_pair' for e in plan['events']))
                 if cfg['uda']['proto_cfg']['enable']:
@@ -61,7 +61,7 @@ class PlanTests(unittest.TestCase):
                     self.assertTrue(any(e['kind']=='weight_eligible' and e['local_iter']==weight
                                         for e in plan['events']))
                 if path.stem.endswith('_proto_struct_edge'):
-                    expected = [3000,3500,5000,5500,6500,10500] if update==3000 else \
+                    expected = [3000,3500,4500,5000,5500,6500,10500] if update==3000 else \
                                [4500,5000,5500,6500,8500,10500]
                     self.assertEqual(plan['extra'],expected)
                 if path.stem.endswith('_3vi'):
@@ -172,18 +172,20 @@ class SavingTests(unittest.TestCase):
         plan=checkpoint_plan(cfg)
         with tempfile.TemporaryDirectory(dir=ROOT/'outputs') as folder:
             runner=self.runner(folder)
+            runner.max_iters=cfg['runner']['max_iters']
+            runner._max_iters=runner.max_iters
             hook=self.policy.DorisCheckpointHook(interval=2000,by_epoch=False,
                 key_iterations=plan['extra'],max_keep_ckpts=-1)
             runner.hooks=[hook];hook.before_run(runner)
             with patch.object(runner,'save_checkpoint',wraps=runner.save_checkpoint) as save:
-                for step in range(1,20001):
+                for step in range(1,runner.max_iters+1):
                     runner.iter=step-1;hook.after_train_iter(runner)
                 self.assertEqual(save.call_count,len(plan['all_iterations']))
             files=sorted(int(p.stem[5:]) for p in Path(folder).glob('iter_*.pth'))
             self.assertEqual(files,plan['all_iterations'])
             latest=torch.load(Path(folder)/'latest.pth')
-            self.assertEqual(latest['meta']['iter'],19999)
-            self.assertEqual(latest['meta']['doris_checkpoint']['completed_iter'],20000)
+            self.assertEqual(latest['meta']['iter'],runner.max_iters-1)
+            self.assertEqual(latest['meta']['doris_checkpoint']['completed_iter'],runner.max_iters)
             with self.assertRaises(FileExistsError):hook.after_train_iter(runner)
 
     def test_independent_bests_ties_nan_zero_and_resume_from_either_best(self):

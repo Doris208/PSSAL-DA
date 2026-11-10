@@ -72,6 +72,7 @@ class PhysiologyTests(unittest.TestCase):
     def test_new_loss_is_called_once_and_backward_reaches_existing_head(self):
         from test_doris_stage1 import new_model
         model = new_model()
+        model.phy_mode = 'legacy_binary'
         model.local_iter = 99
         model.mechanism_cfg['output_mode']='detailed'
         phy_tree = ast.parse((ROOT / 'mmseg/models/uda/phy_reliability.py').read_text())

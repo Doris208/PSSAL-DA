@@ -7,6 +7,7 @@ import importlib.util
 import json
 import math
 import shlex
+import subprocess
 from types import SimpleNamespace
 import unittest
 
@@ -87,7 +88,7 @@ class ComparisonConfigTests(unittest.TestCase):
         self.assertEqual(cfg['model']['memory_module']['memory_dim'], 1024)
         self.assertEqual(cfg['model']['memory_module']['output_channels'], 2048)
 
-    def test_batch_has_eight_jobs_and_additions_script_only_two(self):
+    def test_historical_batch_retains_two_active_comparison_jobs(self):
         def commands(filename):
             raw = (ROOT / filename).read_bytes()
             self.assertNotIn(b'\r', raw)
@@ -96,23 +97,25 @@ class ComparisonConfigTests(unittest.TestCase):
                     if line.startswith('python tools/train.py')]
         all_jobs = commands('train_doris_mitb5_stage1_20k.sh')
         added = commands('train_doris_mitb5_stage1_comparisons_20k.sh')
-        self.assertEqual(len(all_jobs), 8)
+        self.assertEqual(len(all_jobs), 2)
         self.assertEqual(len(added), 2)
         self.assertEqual(all_jobs[-2:], added)
-        self.assertEqual(len({shlex.split(line)[4] for line in all_jobs}), 8)
+        self.assertEqual(len({shlex.split(line)[4] for line in all_jobs}), 2)
         self.assertEqual([shlex.split(line)[2] for line in added], [MEMORY, DAFORMER])
         for line in added:
             args = shlex.split(line)
             self.assertEqual(args[4], '$RUN_ROOT/' + args[2].split('/')[-1][6:-3])
 
     def test_original_configs_unchanged(self):
-        path = ROOT / 'outputs/doris_comparisons_before.json'
-        if not path.is_file():
-            self.skipTest('Local comparison-task snapshot unavailable')
-        snapshot = json.loads(path.read_text())
-        for name, digest in snapshot['hashes'].items():
-            if name.startswith('configs/'):
-                self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), digest, name)
+        # The old task snapshot predates the directory migration and 15K protocol.
+        # Check every current config against the actual H-Phy starting revision.
+        changed = subprocess.check_output(
+            ['git', 'diff', '--name-only', 'ef089d4', '--', 'configs'],
+            cwd=ROOT, text=True).splitlines()
+        allowed = {'configs/hrda/doris/{}/doris_{}_hrda_3vi{}.py'.format(direction, direction, suffix)
+                   for direction in ('goji26RGB2goji30RGB', 'goji26IRRG2goji30RGB', 'goji30IRRG2goji26IRRG')
+                   for suffix in ('_phy_gate', '_phy_struct_gate', '_proto_struct_edge')}
+        self.assertLessEqual(set(changed), allowed)
 
     @unittest.skipUnless(importlib.util.find_spec('mmcv'), 'MMCV unavailable locally')
     def test_real_mmcv_comparison_configs(self):

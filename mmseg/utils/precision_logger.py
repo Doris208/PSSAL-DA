@@ -140,6 +140,9 @@ class PrecisionLoggerHook(LoggerHook):
         return mem_mb.item()
 
     def _keep_train_key(self, name, keys):
+        if name in ('phy_gate_iter', 'phy_gate_rho', 'phy_gate_active_ratio',
+                    'phy_S_mean_active', 'phy_A_mean_active', 'phy_A_max_active'):
+            return True
         if name == 'train_iter_time':
             return True
         if getattr(self, 'paper_names', False) and name.startswith(
@@ -148,7 +151,7 @@ class PrecisionLoggerHook(LoggerHook):
         if name in ('mode', 'epoch', 'iter', 'lr', 'time', 'data_time',
                     'memory') or 'loss' in name or name.split('.')[-1] == 'acc_seg':
             return True
-        if name.startswith('doris.'):
+        if name.startswith(('doris.', 'hphy_')):
             # These scalars are emitted only by the explicit model-side opt-in.
             return True
         if self.paper_process_logging and name in (

@@ -6,11 +6,17 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import runpy
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
+
+GOJI_PALETTE = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                                 'mmseg/datasets/goji_meta.py'))['GOJI_PALETTE']
+CLASS_LABEL_KEYS = ('pseudo_label', 'teacher_label', 'reference_label',
+                    'teacher_pseudo_label', 'gt_label', 'baseline_prediction', 'hphy_prediction')
 
 try:
     from tools.doris_probe_data import spatial_statistics
@@ -65,22 +71,41 @@ def active_analysis(path):
     return root
 
 
-def panel(axis, maps, key):
+TITLES.update(r_veg='Vegetation response R_veg',
+              q_goji_given_veg='Conditional Goji response Q_G|veg',
+              s_phy_class_agreement='Class-conditional agreement S_phy',
+              g_phy='Physiological gate G_phy', attenuation_phy='Relative attenuation A_phy = 1-G_phy')
+
+
+def map_availability(maps, key):
     valid = maps['valid_mask'].astype(bool)
+    available = maps.get({'r_adj': 'adjacency_available',
+                          'r_prob': 'semantic_available'}.get(key, ''), valid)
+    if key in ('s_phy_class_agreement', 'g_phy', 'a_phy', 'attenuation_phy'):
+        label = maps.get('teacher_label', maps.get('pseudo_label'))
+        if label is not None:
+            available = np.asarray(available, dtype=bool) & np.isin(label, [0, 1])
+        weight = maps.get('w_before_phy', maps.get('w_base'))
+        if key != 's_phy_class_agreement' and weight is not None:
+            available = np.asarray(available, dtype=bool) & (weight > 0)
+    return valid & np.asarray(available, dtype=bool)
+
+
+def panel(axis, maps, key):
     if key == 'target_image':
         artist = axis.imshow(maps[key], interpolation='nearest')
         view = json.loads(str(maps['metadata'])).get('input_view', [])
         axis.set_title('Target image' + ('\nIRRG' if view and view[0] == 'NIR'
                                         else '\nRGB' if view else ''))
     else:
-        available = maps.get({'r_adj': 'adjacency_available',
-                              'r_prob': 'semantic_available'}.get(key, ''), valid)
-        values = np.ma.masked_where(~valid | ~np.asarray(available, dtype=bool), maps[key])
+        values = np.ma.masked_where(~map_availability(maps, key), maps[key])
         cmap = copy.copy(plt.get_cmap('RdBu_r' if key.startswith('delta_') else 'viridis'))
         cmap.set_bad('#d0d0d0')
         artist = axis.imshow(values, cmap=cmap, vmin=-1 if key.startswith('delta_') else 0,
                              vmax=1, interpolation='nearest')
         title = TITLES[key]
+        if key == 'r_phy' and 'r_veg' in maps:
+            title = TITLES['r_veg']
         info = json.loads(str(maps['metadata']))
         if key == 'w_pre_proto' and 'w_t_ps' in maps:
             title = TITLES['w_t_ps']
@@ -214,8 +239,16 @@ def online_plate(nodes, kind):
         edge=('target_image','teacher_pseudo_boundary','r_edge','edge_supervision'),
         pbcr=('target_image','w_before_proto','w_after_proto','r_edge','edge_supervision'))
     names = panels[kind]
+    if kind == 'phys' and 's_phy_class_agreement' in nodes[0]:
+        names = ('target_image', 'w_conf', 's_phy_class_agreement', 'attenuation_phy')
+    if kind == 'mparc' and 's_phy_class_agreement' in nodes[0]:
+        names = tuple('s_phy_class_agreement' if key == 'r_phy' else key for key in names)
     height, width = nodes[0]['valid_mask'].shape
-    if kind == 'phys' and len(nodes) == 1:
+    horizontal_bars = len(nodes) == 1 and 's_phy_class_agreement' in nodes[0]
+    if horizontal_bars:
+        fig, axes = plt.subplots(1, len(names), figsize=(3.6*len(names), 5.4), squeeze=False)
+        fig.subplots_adjust(left=.025, right=.985, bottom=.31, top=.84, wspace=.18)
+    elif kind == 'phys' and len(nodes) == 1:
         fig, axes = plt.subplots(1, 4, figsize=(14.4, 4.9), squeeze=False, constrained_layout=True)
     else:
         fig,axes=plt.subplots(len(nodes),len(names),figsize=(3.0*len(names)+1, (3.0*height/width+1)*len(nodes)+1),
@@ -229,14 +262,21 @@ def online_plate(nodes, kind):
             maps['w_before_mparc']=maps['w_before_phy']
             maps['w_after_mparc']=maps['w_after_struct']
             maps['delta_w_mparc']=maps['w_after_mparc']-maps['w_before_mparc']
-        for axis,key in zip(row_axes,names):
+        for column,(axis,key) in enumerate(zip(row_axes,names)):
             if key not in maps:
                 axis.set_axis_off();axis.text(.5,.5,'N/A',ha='center',va='center',transform=axis.transAxes)
                 axis.set_box_aspect(height/width)
                 axis.set_title(TITLES.get(key,key),fontsize=10)
                 continue
             artist=panel(axis,maps,key)
+            if key == 'attenuation_phy':
+                cmap = copy.copy(plt.get_cmap('magma'))
+                cmap.set_bad('#d0d0d0')
+                artist.set_cmap(cmap)
+                artist.set_clim(0, 1-meta.get('gate_min_weight', .75))
             axis.title.set_fontsize(10)
+            if horizontal_bars and kind == 'phys':
+                axis.set_title('({}) {}'.format(chr(97+column), axis.get_title()), fontsize=10)
             if key=='target_image':
                 if row:axis.set_visible(False)
             elif key.startswith('delta_'):delta.append(axis)
@@ -250,9 +290,20 @@ def online_plate(nodes, kind):
                     'mparc':('phy','struct'),'pbcr':('proto','edge')}[kind]
         states=' | '.join(k+': '+meta.get('states',{}).get(k,'unknown') for k in branches)
         row_axes[1].set_ylabel('Iter {}\n{}'.format(meta['iter'],states),fontsize=8)
-    if normal:fig.colorbar(normal[0].images[0],ax=normal,shrink=.6,ticks=[0,.5,1])
-    if delta:fig.colorbar(delta[0].images[0],ax=delta,shrink=.6,ticks=[-1,0,1])
-    if edge:
+    if horizontal_bars:
+        for axis in normal + delta + edge:
+            artist = axis.images[0]
+            minimum, maximum = artist.get_clim()
+            box = axis.get_position()
+            bar_axis = fig.add_axes([box.x0, .235, box.width, .025])
+            bar = fig.colorbar(artist, cax=bar_axis, orientation='horizontal',
+                              ticks=[minimum, (minimum+maximum)/2, maximum])
+            bar.ax.tick_params(labelsize=8, length=3, pad=2)
+            bar.set_label(axis.get_title().replace('\n', ' '), fontsize=8, labelpad=3)
+    elif normal:
+        fig.colorbar(normal[0].images[0],ax=normal,shrink=.6,ticks=[0,.5,1])
+    if delta and not horizontal_bars:fig.colorbar(delta[0].images[0],ax=delta,shrink=.6,ticks=[-1,0,1])
+    if edge and not horizontal_bars:
         scale=edge[0].images[0].get_clim()[1]
         fig.colorbar(edge[0].images[0],ax=edge,shrink=.6,ticks=[0,scale/2,scale])
     info=nodes[-1].get('description',json.loads(str(nodes[-1]['metadata'])))
@@ -283,7 +334,7 @@ def online_plate(nodes, kind):
     return fig
 
 
-def export_spatial_maps(maps, output, completed, stamp, flat=False):
+def export_spatial_maps(maps, output, completed, stamp, flat=False, subfolder='spatial'):
     """One original-grid PNG per saved map, with no axes, margins or resampling."""
     from PIL import Image, PngImagePlugin
     info = json.loads(str(maps['metadata']))
@@ -295,11 +346,10 @@ def export_spatial_maps(maps, output, completed, stamp, flat=False):
     if (original != shape and not mapped_crop) or maps['target_image'].shape[:2] != shape:
         raise ValueError('Export grid differs from original TIF; an explicit spatial mapping is required')
     statistics = spatial_statistics(maps)
-    folder = Path(output) / 'spatial'
+    folder = Path(output) / subfolder
     if not flat:
         folder = folder / ('iter_{:06d}'.format(completed))
     folder.mkdir(parents=True, exist_ok=True)
-    valid = maps['valid_mask'].astype(bool)
     for key, value in maps.items():
         value = np.asarray(value)
         if key == 'target_image':
@@ -308,15 +358,15 @@ def export_spatial_maps(maps, output, completed, stamp, flat=False):
             pixels = (np.clip(value, 0, 1) * 255).round().astype(np.uint8)
         elif value.ndim != 2:
             continue
-        elif key in ('pseudo_label', 'reference_label'):
+        elif key in CLASS_LABEL_KEYS:
             evidence = info.get('phy_evidence') or info.get('reference_evidence')
-            if evidence:
-                palette = np.asarray(evidence['palette'], dtype=np.uint8)
-                pixels = np.full((*shape, 3), 208, dtype=np.uint8)
-                labeled = (value >= 0) & (value < len(palette))
-                pixels[labeled] = palette[value[labeled].astype(np.int64)]
-            else:
-                pixels = value.astype(np.uint8)
+            palette = np.asarray(info.get('class_palette') or
+                                 (evidence or {}).get('palette') or GOJI_PALETTE, dtype=np.uint8)
+            if not np.isin(value, list(range(len(palette))) + [255]).all():
+                raise ValueError('Invalid reduced class ids in ' + key)
+            pixels = np.full((*shape, 3), 208, dtype=np.uint8)
+            labeled = (value >= 0) & (value < len(palette))
+            pixels[labeled] = palette[value[labeled].astype(np.int64)]
         elif key == 'phy_semantic_check':
             pixels = np.asarray(info['semantic_palette'],dtype=np.uint8)[value]
         elif value.dtype == bool:
@@ -324,17 +374,23 @@ def export_spatial_maps(maps, output, completed, stamp, flat=False):
         else:
             scale = max(float(info.get('edge_supervision_max', 1)), 1e-12) if key == 'edge_supervision' else 1
             scaled = (value + 1) / 2 if key.startswith('delta_') else value / scale
-            cmap = plt.get_cmap('RdBu_r' if key.startswith('delta_') else 'viridis')
+            style = info.get('spatial_styles', {}).get(key)
+            if style:
+                scaled = (value-style['vmin']) / (style['vmax']-style['vmin'])
+            cmap = plt.get_cmap(style['cmap'] if style else
+                               'RdBu_r' if key.startswith('delta_') else 'viridis')
             pixels = cmap(scaled, bytes=True)
-            availability_key = {'r_adj': 'adjacency_available', 'r_prob': 'semantic_available'}.get(key, '')
-            available = maps.get(availability_key, valid)
-            pixels[~valid | ~np.asarray(available, dtype=bool)] = [208, 208, 208, 255]
+            pixels[~map_availability(maps, key)] = [208, 208, 208, 255]
         path = folder / (key + '.png')
         if path.exists():
             save_figure(None, path, stamp)
             with Image.open(path) as image:
                 if image.size != shape[::-1]:
                     raise ValueError('Existing spatial map has wrong dimensions')
+                if key in CLASS_LABEL_KEYS and (image.mode != 'RGB' or
+                        not np.array_equal(np.asarray(image), pixels)):
+                    raise ValueError('Existing label PNG uses obsolete or different colors; '
+                                     'render saved NPZs to a new output directory: ' + str(path))
             continue
         tags = PngImagePlugin.PngInfo()
         tags.add_text('Description', stamp)
@@ -353,6 +409,29 @@ def export_spatial_maps(maps, output, completed, stamp, flat=False):
     temporary = path.with_suffix('.json.tmp')
     temporary.write_text(content, encoding='utf-8')
     temporary.replace(path)
+
+
+def export_hphy_native_panels(maps, output, completed, stamp):
+    """Two matched exports from the same saved responses, without resizing."""
+    if 's_phy_class_agreement' not in maps or maps['valid_mask'].shape != (256, 256):
+        return
+    info = json.loads(str(maps['metadata']))
+    maximum = 1-info.get('gate_min_weight', .75)
+    styles = {key: dict(vmin=0, vmax=maximum, cmap='magma')
+              for key in ('attenuation_phy', 'a_phy')}
+    info.update(spatial_styles=styles, native_panel_version=1)
+    full = dict(maps, metadata=np.array(json.dumps(info, sort_keys=True)))
+    provenance = dict(json.loads(stamp), spatial_styles=styles, native_panel_version=1)
+    export_spatial_maps(full, output, completed, json.dumps(provenance, sort_keys=True),
+                        subfolder='full256')
+    center = {key: value[30:226, 30:226].copy() if np.asarray(value).shape[:2] == (256, 256)
+              else value for key, value in maps.items()}
+    info.update(display_crop_xyxy=[30, 30, 226, 226],
+                spatial_mapping='Exact center slice [30:226,30:226] of the full 256 grid')
+    center['metadata'] = np.array(json.dumps(info, sort_keys=True))
+    provenance.update(display_crop_xyxy=[30, 30, 226, 226])
+    export_spatial_maps(center, output, completed, json.dumps(provenance, sort_keys=True),
+                        subfolder='center196')
 
 
 def render_online_node(maps, output, completed, array_sha256='', render_timing='after_train_iter'):
@@ -383,6 +462,7 @@ def render_online_node(maps, output, completed, array_sha256='', render_timing='
     if files or not any(info.get('modules',{}).values()):
         stamp=json.dumps(dict(info,array_sha256=array_sha256,render_timing=render_timing),sort_keys=True)
         export_spatial_maps(maps,output,completed,stamp)
+        export_hphy_native_panels(maps,output,completed,stamp)
     return files
 
 
@@ -531,6 +611,8 @@ def render_baseline_paper(source, output=None):
 
 
 def phy_paper_plate(maps, weight_range=(.45, .60), delta_range=(-.10, 0.0)):
+    if 's_phy_class_agreement' in maps:
+        raise ValueError('H-Phy uses the four-panel online renderer; legacy paper plates require legacy arrays')
     """Five aligned panels, with a GT-based check of the saved gate responses."""
     from matplotlib.patches import Patch
     try:
