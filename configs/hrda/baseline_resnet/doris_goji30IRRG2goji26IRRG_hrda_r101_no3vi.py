@@ -16,11 +16,11 @@ model = dict(backbone=dict(
     in_channels=3, pretrained='open-mmlab://resnet101_v1c'))
 uda = dict(input_channel_order=['NIR', 'R', 'G'])
 archive_source_code = False
-runner = dict(type='IterBasedRunner', max_iters=20000)
+runner = dict(type='IterBasedRunner', max_iters=15000)
 
 work_dir = '/root/shared-nvme/work_dirs/doris_no3vi_r101/goji30IRRG2goji26IRRG_hrda_r101_no3vi'
 name = 'doris_goji30IRRG2goji26IRRG_hrda_r101_no3vi'
 name_dataset = 'goji30IRRG2goji26IRRG_256x256_no3vi'
-name_opt = 'adamw_6e-05_poly10warm_20k'
+name_opt = 'adamw_6e-05_poly10warm_15k'
 
 del deepcopy, no3vi_data

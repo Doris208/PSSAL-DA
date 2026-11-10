@@ -17,7 +17,7 @@ optimizer = dict(paramwise_cfg=dict(custom_keys=dict(
     # The discriminator owns a separate Adam optimizer. Do not step it twice.
     discriminator=dict(lr_mult=0.0, decay_mult=0.0))))
 custom_hooks = [dict(type='MemoryAdaptNetOptimizerStateHook', interval=1000)]
-runner = dict(type='IterBasedRunner', max_iters=20000)
+runner = dict(type='IterBasedRunner', max_iters=15000)
 log_config = dict(interval=50, hooks=[dict(type='PrecisionLoggerHook', by_epoch=False)])
 archive_source_code = False
 
@@ -26,4 +26,4 @@ name = 'doris_goji26IRRG2goji30RGB_memoryadaptnet_3vi'
 exp = 'doris_stage1_memoryadaptnet_mitb5_comparison'
 name_encoder = 'mitb5'
 name_architecture = 'memoryadaptnet_mitb5_3vi'
-name_opt = 'adamw_6e-05_poly10warm_20k'
+name_opt = 'adamw_6e-05_poly10warm_15k'

@@ -539,15 +539,18 @@ class DorisConfigTests(unittest.TestCase):
             for flag in ('mechanism_logging', 'fixed_probe_enabled'):
                 self.assertFalse(baseline['uda'].pop(flag))
             for key in ('model', 'uda', 'data', 'optimizer', 'optimizer_config', 'lr_config',
-                        'runner', 'checkpoint_config', 'evaluation', 'fp16', 'seed', 'crop_size'):
+                        'checkpoint_config', 'evaluation', 'fp16', 'seed', 'crop_size'):
                 self.assertEqual(old[key], baseline[key], (direction, key))
+            self.assertEqual(old['runner']['max_iters'],20000)
+            self.assertEqual(baseline['runner']['max_iters'],15000)
             full = helpers.static_config('configs/hrda/doris/' + direction + '/doris_' + stem + '_proto_struct_edge.py')
             proto, edge = full['uda']['proto_cfg'], full['uda']['struct_edge_cfg']
             self.assertEqual((proto['target_update_start'], proto['weight_start'],
                 proto['lambda_proto_tgt'], proto['proto_min_weight'], proto['proto_power'],
                 edge['loss_weight_src'], edge['loss_weight_tgt']), values)
             self.assertEqual(proto['loss_start'], proto['weight_start'])
-            for key in ('data', 'optimizer', 'optimizer_config', 'lr_config', 'runner',
+            self.assertEqual(full['runner']['max_iters'],15000)
+            for key in ('data', 'optimizer', 'optimizer_config', 'lr_config',
                         'checkpoint_config', 'evaluation', 'fp16', 'seed', 'crop_size'):
                 self.assertEqual(full[key], old[key], (direction, key))
 
@@ -555,8 +558,18 @@ class DorisConfigTests(unittest.TestCase):
     def test_existing_configs_and_batch_scripts_are_byte_identical(self):
         snapshot = json.loads((ROOT / 'outputs/doris_stage1_before.json').read_text())
         for path, digest in snapshot['hashes'].items():
+            if Path(path).name.startswith('doris_') or path.startswith('train_doris'):
+                continue
             if path.startswith('configs/') or path.endswith('.sh'):
                 self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest, path)
+
+    def test_all_doris_experiment_configs_use_15000_iterations(self):
+        paths=sorted((ROOT/'configs').rglob('doris_*.py'))
+        self.assertEqual(len(paths),29)
+        for path in paths:
+            cfg=helpers.static_config(path.relative_to(ROOT).as_posix())
+            self.assertEqual(cfg['runner']['max_iters'],15000,path.name)
+            self.assertTrue(cfg['name_opt'].endswith('_15k'),path.name)
 
     @unittest.skipUnless(importlib.util.find_spec('mmcv'), 'MMCV unavailable locally')
     def test_real_mmcv_Config_fromfile_all_30(self):

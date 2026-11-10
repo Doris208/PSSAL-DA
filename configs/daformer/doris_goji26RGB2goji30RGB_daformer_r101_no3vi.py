@@ -15,13 +15,13 @@ model = dict(backbone=dict(
     in_channels=3, pretrained='open-mmlab://resnet101_v1c'))
 uda = dict(input_channel_order=['R', 'G', 'B'])
 archive_source_code = False
-runner = dict(type='IterBasedRunner', max_iters=20000)
+runner = dict(type='IterBasedRunner', max_iters=15000)
 log_config = dict(interval=50, hooks=[dict(
     type='PrecisionLoggerHook', by_epoch=False, output_mode='diagnostic')])
 
 work_dir = '/root/shared-nvme/work_dirs/doris_no3vi_r101/goji26RGB2goji30RGB_daformer_r101_no3vi'
 name = 'doris_goji26RGB2goji30RGB_daformer_r101_no3vi'
 name_dataset = 'goji26RGB2goji30RGB_256x256_no3vi'
-name_opt = 'adamw_6e-05_poly10warm_20k'
+name_opt = 'adamw_6e-05_poly10warm_15k'
 
 del deepcopy, no3vi_data

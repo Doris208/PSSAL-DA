@@ -27,4 +27,4 @@ python tools/train.py configs/hrda/doris/goji26IRRG2goji30RGB/doris_goji26IRRG2g
 echo "===== goji26IRRG2goji30RGB 8/8 MPARC + PBCR (Full) ====="
 # python tools/train.py configs/hrda/doris/goji26IRRG2goji30RGB/doris_goji26IRRG2goji30RGB_hrda_3vi_proto_struct_edge.py --work-dir "/root/shared-nvme/work_dirs/doris_stage1/goji26IRRG2goji30RGB/goji26IRRG2goji30RGB_hrda_3vi_proto_struct_edge"
 
-echo "All goji26IRRG2goji30RGB DORIS aligned 20k ablations finished."
+echo "All goji26IRRG2goji30RGB DORIS aligned 15k ablations finished."

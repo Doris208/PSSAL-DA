@@ -16,7 +16,7 @@ model = dict(backbone=dict(
 optimizer = dict(paramwise_cfg=dict(custom_keys=dict(
     discriminator=dict(lr_mult=0.0, decay_mult=0.0))))
 archive_source_code = False
-runner = dict(type='IterBasedRunner', max_iters=20000)
+runner = dict(type='IterBasedRunner', max_iters=15000)
 log_config = dict(interval=50, hooks=[dict(
     type='PrecisionLoggerHook', by_epoch=False, output_mode='diagnostic')])
 
@@ -24,6 +24,6 @@ work_dir = '/root/shared-nvme/work_dirs/doris_no3vi_r101/goji26IRRG2goji30RGB_me
 name = 'doris_goji26IRRG2goji30RGB_memoryadaptnet_r101_no3vi'
 name_dataset = 'goji26IRRG2goji30RGB_256x256_no3vi'
 name_architecture = 'memoryadaptnet_r101_no3vi'
-name_opt = 'adamw_6e-05_poly10warm_20k'
+name_opt = 'adamw_6e-05_poly10warm_15k'
 
 del deepcopy, no3vi_data

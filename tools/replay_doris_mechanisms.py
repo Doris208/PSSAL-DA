@@ -309,6 +309,7 @@ def replay_node(config, row, output, device, data_root=None, phy_evidence=False,
     if signature != inference_signature(historical):
         raise ValueError('Provided configuration differs from saved model/branch/input settings')
     runtime = deepcopy(config)
+    runtime.runner = deepcopy(historical.runner)
     # Construction only. No runner, optimizer, init_weights or training entry point is invoked.
     runtime.model.pretrained = None
     runtime.model.backbone.pretrained = None

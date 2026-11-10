@@ -62,7 +62,7 @@ def audit(reader):
             assert cfg.model.backbone.type == 'mit_b5'
             assert cfg.model.backbone.in_chans == 6
             assert cfg.model.decode_head.num_classes == 5
-            assert cfg.runner.max_iters == 20000 and cfg.data.samples_per_gpu == 2
+            assert cfg.runner.max_iters == 15000 and cfg.data.samples_per_gpu == 2
             assert cfg.log_config == full.log_config, (name, 'logger')
             assert cfg.uda.get('mechanism_logging', False) == any(flags), name
             assert cfg.uda.get('fixed_probe_enabled', False) == any(flags), name

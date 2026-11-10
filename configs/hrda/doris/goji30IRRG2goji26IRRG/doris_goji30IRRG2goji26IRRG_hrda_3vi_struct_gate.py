@@ -33,6 +33,7 @@ work_dir = '/root/shared-nvme/work_dirs/doris_stage1/goji30IRRG2goji26IRRG/goji3
 name = 'doris_goji30IRRG2goji26IRRG_hrda_3vi_struct_gate'
 exp = 'doris_stage1_ablation'
 name_uda = 'doris_structural'
-name_opt = 'adamw_6e-05_poly10warm_20k'
+runner = dict(type='IterBasedRunner', max_iters=15000)
+name_opt = 'adamw_6e-05_poly10warm_15k'
 
 del make_log_config, make_model_override, make_uda_override

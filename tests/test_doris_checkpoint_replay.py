@@ -321,12 +321,17 @@ class CheckpointReplayTests(unittest.TestCase):
                 [dict(img_norm_cfg=dict(mean=[0]*6,std=[255]*6))])
             sample_meta = dict(target_path=str(target),tensor_sha256='synthetic',
                 original_shape=[16,16],spatial_shape=[16,16],synthetic_fixture=True)
+            historical = copy.deepcopy(cfg)
+            historical.runner.max_iters = 20000
             for step in (6500,20000):
                 torch.save(dict(state_dict=self.model().state_dict(),
-                    meta=dict(iter=step-1,config=json.dumps(cfg))),root/('iter_%d.pth'%step))
+                    meta=dict(iter=step-1,config=json.dumps(historical))),root/('iter_%d.pth'%step))
             rows = self.replay.select_checkpoints(self.replay.audit_checkpoints(root),pilot=True)
+            def build_historical(runtime):
+                self.assertEqual(runtime.runner.max_iters,20000)
+                return self.model()
             modules = {'mmcv':SimpleNamespace(Config=Config),
-                'mmseg.models.builder':SimpleNamespace(build_train_model=lambda cfg:self.model()),
+                'mmseg.models.builder':SimpleNamespace(build_train_model=build_historical),
                 'tools.build_doris_mechanism_figures':SimpleNamespace(render_online_node=render)}
             from PIL import Image
             with patch.dict(sys.modules,modules), patch.object(observation,'load_probe_sample',

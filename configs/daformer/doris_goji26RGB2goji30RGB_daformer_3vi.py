@@ -15,7 +15,7 @@ uda = dict(
     proto_cfg=dict(enable=False, save_proto_debug=False, log_class_stats=False),
     struct_edge_cfg=dict(enable=False, use_edge_loss=False),
     joint_gate_cfg=dict(enable=False, save_joint_debug=False))
-runner = dict(type='IterBasedRunner', max_iters=20000)
+runner = dict(type='IterBasedRunner', max_iters=15000)
 log_config = dict(interval=50, hooks=[dict(type='PrecisionLoggerHook', by_epoch=False)])
 archive_source_code = False
 
@@ -24,4 +24,4 @@ name = 'doris_goji26RGB2goji30RGB_daformer_3vi'
 exp = 'doris_stage1_daformer_mitb5_comparison'
 name_encoder = 'mitb5'
 name_architecture = 'daformer_sepaspp_mitb5'
-name_opt = 'adamw_6e-05_poly10warm_20k'
+name_opt = 'adamw_6e-05_poly10warm_15k'

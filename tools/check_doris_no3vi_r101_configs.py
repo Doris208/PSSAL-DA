@@ -101,7 +101,7 @@ def main():
                     'checkpoint_config', 'seed', 'fp16', 'custom_imports',
                     'custom_hooks'):
             assert cfg.get(key) == old.get(key), path + ': ' + key
-        assert cfg.runner == dict(type='IterBasedRunner', max_iters=20000)
+        assert cfg.runner == dict(type='IterBasedRunner', max_iters=15000)
         assert cfg.data.samples_per_gpu == 2
         assert without_vi(cfg.data) == without_vi(old.data), \
             path + ': split/augmentation/normalization changed'
@@ -121,7 +121,7 @@ def main():
         assert cfg.work_dir not in work_dirs
         work_dirs.add(cfg.work_dir)
         expected_commands.append(['python', 'tools/train.py', path])
-        print('{}: PASS, {}, R101/3ch/5classes, 20k, batch=2, lr={}'.format(
+        print('{}: PASS, {}, R101/3ch/5classes, 15k, batch=2, lr={}'.format(
             filename, cfg.uda.type, cfg.optimizer.lr))
     script = (ROOT / 'train_doris_no3vi_r101_20k.sh').read_bytes()
     assert b'\r' not in script and b'set -e\n' in script
@@ -129,7 +129,7 @@ def main():
                 if line.startswith('python ')]
     assert commands == expected_commands
     print('PASS: original networks/UDA/protocol retained except VI input, '
-          'matching V1c pretraining, user-confirmed 20k override and '
+          'matching V1c pretraining, user-requested 15k horizon and '
           'MemoryAdaptNet discriminator optimizer isolation. '
           'Cloud initialization/training not executed.')
 

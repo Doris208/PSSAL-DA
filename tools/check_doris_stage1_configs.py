@@ -67,7 +67,7 @@ def check_config(cfg, expected, doris_full=False):
         assert struct_mode == 'legacy_product'
         assert edge_mode == 'legacy'
         assert all(x.get('boundary_loss_mode', 'legacy') == 'legacy' for x in boundary_losses)
-    assert cfg['runner']['max_iters'] == 20000
+    assert cfg['runner']['max_iters'] == (15000 if cfg.get('name','').startswith('doris_') else 20000)
     assert cfg['data']['samples_per_gpu'] == 2
     assert cfg['seed'] == 0
     assert cfg['uda']['pseudo_threshold'] == 0.968
@@ -111,7 +111,7 @@ def audit_comparison_configs(reader):
         assert model['backbone']['pretrained'] == '/root/shared-nvme/pretrained/mit_b5.pth'
         assert not model.get('pretrained')
         assert not any(k in model['backbone'] for k in ('depth', 'in_channels', 'dilations'))
-        assert cfg['runner']['max_iters'] == 20000
+        assert cfg['runner']['max_iters'] == 15000
         assert cfg['seed'] == 0 and cfg['data']['samples_per_gpu'] == 2
         assert cfg['optimizer']['lr'] == 6e-5
         assert cfg['checkpoint_config']['interval'] == cfg['evaluation']['interval'] == 1000
