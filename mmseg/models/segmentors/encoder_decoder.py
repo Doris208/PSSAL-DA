@@ -115,16 +115,20 @@ class EncoderDecoder(BaseSegmentor):
                                    gt_semantic_seg,
                                    seg_weight=None,
                                    struct_edge_weight=None,
-                                   struct_prior_response=None):
+                                   struct_prior_response=None,
+                                   struct_edge_valid_mask=None):
         """Run forward function and calculate loss for decode head in
         training."""
         losses = dict()
+        boundary_kwargs = (dict(struct_edge_valid_mask=struct_edge_valid_mask)
+                           if struct_edge_valid_mask is not None else {})
         loss_decode = self.decode_head.forward_train(x, img_metas,
                                                      gt_semantic_seg,
                                                      self.train_cfg,
                                                      seg_weight,
                                                      struct_edge_weight,
-                                                     struct_prior_response)
+                                                     struct_prior_response,
+                                                     **boundary_kwargs)
 
         losses.update(add_prefix(loss_decode, 'decode'))
         return losses

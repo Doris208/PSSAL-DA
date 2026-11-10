@@ -237,14 +237,17 @@ class HRDAHead(BaseDecodeHead):
                       train_cfg,
                       seg_weight=None,
                       struct_edge_weight=None,
-                      struct_prior_response=None):
+                      struct_prior_response=None,
+                      struct_edge_valid_mask=None):
         """Forward function for training."""
         if self.enable_hr_crop:
             assert self.hr_crop_box is not None
         seg_logits = self.forward(
             inputs, struct_prior_response=struct_prior_response)
+        boundary_kwargs = (dict(struct_edge_valid_mask=struct_edge_valid_mask)
+                           if struct_edge_valid_mask is not None else {})
         losses = self.losses(seg_logits, gt_semantic_seg, seg_weight,
-                             struct_edge_weight)
+                             struct_edge_weight, **boundary_kwargs)
         self.reset_crop()
         return losses
 
@@ -256,11 +259,12 @@ class HRDAHead(BaseDecodeHead):
                seg_logit,
                seg_label,
                seg_weight=None,
-               struct_edge_weight=None):
+               struct_edge_weight=None,
+               struct_edge_valid_mask=None):
         """Compute losses."""
         fused_seg, lr_seg, hr_seg = seg_logit
         loss = super(HRDAHead, self).losses(fused_seg, seg_label, seg_weight,
-                                            struct_edge_weight)
+                                            struct_edge_weight, struct_edge_valid_mask)
         if self.hr_loss_weight == 0 and self.lr_loss_weight == 0:
             return loss
 
@@ -269,7 +273,8 @@ class HRDAHead(BaseDecodeHead):
                 add_prefix(
                     super(HRDAHead, self).losses(lr_seg, seg_label,
                                                  seg_weight,
-                                                 struct_edge_weight), 'lr'))
+                                                 struct_edge_weight,
+                                                 struct_edge_valid_mask), 'lr'))
         if self.hr_loss_weight > 0 and self.enable_hr_crop:
             cropped_seg_label = crop(seg_label, self.hr_crop_box)
             if seg_weight is not None:
@@ -281,30 +286,34 @@ class HRDAHead(BaseDecodeHead):
                                                   self.hr_crop_box)
             else:
                 cropped_struct_edge_weight = None
+            cropped_boundary_valid = (crop(struct_edge_valid_mask, self.hr_crop_box)
+                                      if struct_edge_valid_mask is not None else None)
             self.debug_output['Cropped GT'] = \
                 cropped_seg_label.squeeze(1).detach().cpu().numpy()
             loss.update(
                 add_prefix(
                     super(HRDAHead, self).losses(hr_seg, cropped_seg_label,
                                                  cropped_seg_weight,
-                                                 cropped_struct_edge_weight),
+                                                 cropped_struct_edge_weight,
+                                                 cropped_boundary_valid),
                     'hr'))
         elif self.hr_loss_weight > 0:
             loss.update(
                 add_prefix(
                     super(HRDAHead, self).losses(hr_seg, seg_label,
                                                  seg_weight,
-                                                 struct_edge_weight), 'hr'))
+                                                 struct_edge_weight,
+                                                 struct_edge_valid_mask), 'hr'))
         for key in list(loss.keys()):
-            if key.startswith('loss_'):
+            if key.startswith(('loss_', 'edge_diag.')):
                 loss[key] *= (1 - self.lr_loss_weight - self.hr_loss_weight)
         if self.lr_loss_weight > 0:
             for key in list(loss.keys()):
-                if key.startswith('lr.loss_'):
+                if key.startswith(('lr.loss_', 'lr.edge_diag.')):
                     loss[key] *= self.lr_loss_weight
         if self.hr_loss_weight > 0:
             for key in list(loss.keys()):
-                if key.startswith('hr.loss_'):
+                if key.startswith(('hr.loss_', 'hr.edge_diag.')):
                     loss[key] *= self.hr_loss_weight
 
         return loss

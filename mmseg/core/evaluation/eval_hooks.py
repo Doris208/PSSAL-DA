@@ -6,9 +6,10 @@ import torch.distributed as dist
 from mmcv.runner import DistEvalHook as _DistEvalHook
 from mmcv.runner import EvalHook as _EvalHook
 from torch.nn.modules.batchnorm import _BatchNorm
+from .goji_best import GojiBestMixin
 
 
-class EvalHook(_EvalHook):
+class EvalHook(GojiBestMixin, _EvalHook):
     """Single GPU EvalHook, with efficient test support.
 
     Args:
@@ -45,7 +46,7 @@ class EvalHook(_EvalHook):
             self._save_ckpt(runner, key_score)
 
 
-class DistEvalHook(_DistEvalHook):
+class DistEvalHook(GojiBestMixin, _DistEvalHook):
     """Distributed EvalHook, with efficient test support.
 
     Args:

@@ -26,8 +26,10 @@ DEFAULT_PREFIX = 'goji26IRRG2goji30RGB_fig_e1_process_curves'
 
 CURVES = (
     ('teacher_confidence', 'Teacher confidence', '#3b6fd8', 0.018),
+    ('physiology_pseudo_weight', 'Physiology pseudo weight', '#2a9878', 0.018),
     ('mparc_pseudo_weight', 'Reliability-weighted pseudo supervision',
      '#f0a500', -0.020),
+    ('prototype_pseudo_weight', 'Prototype refined weight', '#9b59b6', 0.018),
     ('proto_target_update_ratio', 'Prototype update ratio', '#d95f02', 0.018),
     ('boundary_weight_x100', 'Boundary refinement weight (x100)', '#5b5b5b',
      -0.018),
@@ -69,8 +71,25 @@ def read_rows(path):
         reader = csv.DictReader(f)
         for row in reader:
             parsed = {'iter': int(float(row['iter']))}
+            if 'w_conf_mean_valid' in row:
+                if row.get('data_source') != 'training_batch_actual':
+                    raise ValueError('Process curves require training_batch_actual, not fixed-probe data')
+                for key, source, scale in (
+                        ('teacher_confidence', 'w_conf_mean_valid', 1),
+                        ('physiology_pseudo_weight', 'w_t_phy_mean_valid', 1),
+                        ('mparc_pseudo_weight', 'w_t_ps_mean_valid', 1),
+                        ('prototype_pseudo_weight', 'w_t_proto_mean_valid', 1),
+                        ('proto_target_update_ratio', 'proto_target_update_ratio', 1),
+                        ('boundary_weight_x100', 'boundary_weight_mean_valid', 100)):
+                    if key == 'mparc_pseudo_weight' and row.get('struct_enabled') == '0':
+                        continue  # Physiology-only is already represented by W_phy.
+                    if row.get(source, '') != '':
+                        parsed[key] = scale * float(row[source])
+                rows.append(parsed)
+                continue
             for key, _, _color, _offset in CURVES:
-                parsed[key] = float(row[key])
+                if row.get(key, '') != '':
+                    parsed[key] = float(row[key])
             rows.append(parsed)
     if not rows:
         raise RuntimeError(f'No rows found in {path}')
@@ -113,8 +132,9 @@ def plot_curves(rows, out_dir, prefix, formats, dpi):
     })
     fig, ax = plt.subplots(figsize=(7.2, 4.2))
 
-    for key, label, color, offset in CURVES:
-        ys = [row[key] for row in rows]
+    available = [curve for curve in CURVES if any(curve[0] in row for row in rows)]
+    for key, label, color, offset in available:
+        ys = [row.get(key, math.nan) for row in rows]
         ax.plot(
             xs,
             ys,
@@ -127,14 +147,15 @@ def plot_curves(rows, out_dir, prefix, formats, dpi):
             label=label)
         annotate_selected_points(ax, xs, ys, color, offset, important_xs)
 
-    max_value = max(max(row[key] for row in rows) for key, *_ in CURVES)
+    max_value = max(row[key] for row in rows for key, *_ in available if key in row)
     y_top = max(0.94, math.ceil((max_value + 0.08) * 10.0) / 10.0)
     ax.set_xlim(min(xs) - 200, max(xs) + 200)
     ax.set_ylim(-0.02, y_top)
     ax.set_xlabel('Training Iteration (x1000)', fontsize=11, fontweight='bold')
     ax.set_ylabel('Value', fontsize=11, fontweight='bold')
-    ax.set_xticks(xs)
-    ax.set_xticklabels([str(x // 1000) for x in xs], fontsize=8)
+    ticks = sorted(set(xs[::max(1, len(xs) // 10)] + [xs[-1]]))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([f'{x / 1000:g}' for x in ticks], fontsize=8)
     ax.set_yticks([i / 10.0 for i in range(0, int(y_top * 10) + 1)])
     ax.tick_params(axis='y', labelsize=8)
     ax.grid(axis='y', color='#e5e5e5', linewidth=0.8)
@@ -182,8 +203,9 @@ def style_panel(ax, xs, ylabel, ylim):
     ax.set_xlim(min(xs) - 200, max(xs) + 200)
     ax.set_ylim(*ylim)
     ax.set_ylabel(ylabel, fontsize=9, fontweight='bold')
-    ax.set_xticks(xs)
-    ax.set_xticklabels([str(x // 1000) for x in xs], fontsize=7)
+    ticks = sorted(set(xs[::max(1, len(xs) // 10)] + [xs[-1]]))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([f'{x / 1000:g}' for x in ticks], fontsize=7)
     ax.tick_params(axis='y', labelsize=7)
     ax.grid(axis='y', color='#e5e5e5', linewidth=0.8)
     ax.grid(axis='x', color='#f0f0f0', linewidth=0.6)
@@ -202,18 +224,12 @@ def plot_two_panel_curves(rows, out_dir, prefix, formats, dpi):
     panel_a = (
         ('teacher_confidence', 'Teacher confidence', '#3b6fd8', 0.018),
     )
-    panel_b = (
-        ('mparc_pseudo_weight', 'Reliability-weighted pseudo supervision',
-         '#f0a500', 0.018),
-        ('proto_target_update_ratio', 'Prototype update ratio', '#d95f02',
-         -0.018),
-        ('boundary_weight_x100', 'Boundary refinement weight (x100)',
-         '#5b5b5b', -0.018),
-    )
+    panel_b = CURVES[1:]
 
     for ax, panel, tag in zip(axes, (panel_a, panel_b), ('(a)', '(b)')):
+        panel = [curve for curve in panel if any(curve[0] in row for row in rows)]
         for key, label, color, offset in panel:
-            ys = [row[key] for row in rows]
+            ys = [row.get(key, math.nan) for row in rows]
             ax.plot(
                 xs,
                 ys,
@@ -244,7 +260,9 @@ def plot_two_panel_curves(rows, out_dir, prefix, formats, dpi):
             columnspacing=1.1)
 
     style_panel(axes[0], xs, 'Supervision reliability', (-0.02, 0.94))
-    style_panel(axes[1], xs, 'Weighted branch participation', (-0.02, 0.31))
+    # Refined weights can approach one; do not clip them to the legacy 0.31 range.
+    branch_max = max((row[key] for row in rows for key, *_ in panel_b if key in row), default=0)
+    style_panel(axes[1], xs, 'Branch weight / update ratio', (-0.02, max(.31, branch_max * 1.1)))
     axes[1].set_xlabel('Training Iteration (x1000)',
                        fontsize=10,
                        fontweight='bold')

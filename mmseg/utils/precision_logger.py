@@ -5,13 +5,14 @@
 import datetime
 import os
 import os.path as osp
+import time
 from collections import OrderedDict
 
 import mmcv
 import torch
 import torch.distributed as dist
 from mmcv.fileio.file_client import FileClient
-from mmcv.runner import HOOKS, LoggerHook
+from mmcv.runner import HOOKS, Hook, LoggerHook
 from mmcv.utils import is_tuple_of, scandir
 
 
@@ -67,7 +68,9 @@ class PrecisionLoggerHook(LoggerHook):
                  json_keys=None,
                  output_mode='minimal',
                  paper_process_logging=False,
-                 log_memory=False):
+                 log_memory=False,
+                 paper_names=False,
+                 process_interval=1000):
         super(PrecisionLoggerHook, self).__init__(interval, ignore_last,
                                                   reset_flag, by_epoch)
         self.by_epoch = by_epoch
@@ -80,6 +83,8 @@ class PrecisionLoggerHook(LoggerHook):
         self.output_mode = output_mode
         self.paper_process_logging = paper_process_logging
         self.log_memory = log_memory
+        self.paper_names = paper_names
+        self.process_interval = process_interval
 
         if out_dir is None and file_client_args is not None:
             raise ValueError(
@@ -114,6 +119,11 @@ class PrecisionLoggerHook(LoggerHook):
                  f'{self.file_client.name} after the training process.'))
 
         self.start_iter = runner.iter
+        self.mechanism = None
+        model = runner.model.module if hasattr(runner.model, 'module') else runner.model
+        if runner.rank == 0 and getattr(model, 'mechanism_logging', False):
+            from .mechanism import MechanismCollector
+            self.mechanism = MechanismCollector(runner, model)
         self.json_log_path = osp.join(runner.work_dir,
                                       f'{runner.timestamp}.log.json')
         if runner.meta is not None:
@@ -130,8 +140,16 @@ class PrecisionLoggerHook(LoggerHook):
         return mem_mb.item()
 
     def _keep_train_key(self, name, keys):
+        if name == 'train_iter_time':
+            return True
+        if getattr(self, 'paper_names', False) and name.startswith(
+                ('mparc.', 'pbcr.', 'teacher.', 'schedule.')):
+            return True
         if name in ('mode', 'epoch', 'iter', 'lr', 'time', 'data_time',
                     'memory') or 'loss' in name or name.split('.')[-1] == 'acc_seg':
+            return True
+        if name.startswith('doris.'):
+            # These scalars are emitted only by the explicit model-side opt-in.
             return True
         if self.paper_process_logging and name in (
                 'teacher_target_confidence_mean', 'mparc_pseudo_weight_mean',
@@ -140,6 +158,50 @@ class PrecisionLoggerHook(LoggerHook):
         if self.output_mode == 'diagnostic':
             return keys is None or name in keys
         return keys is not None and name in keys
+
+    def _paper_log_values(self, values, runner):
+        """Presentation only: keep training loss keys out of this renaming step."""
+        result = OrderedDict()
+        snapshot = (runner.iter + 1) % self.process_interval == 0
+        names = dict(loss='loss_total', loss_phy_src='mparc.loss_phy_source_raw',
+                     loss_phy_tgt='mparc.loss_phy_target',
+                     loss_proto_tgt='pbcr.loss_proto_target',
+                     **{'doris.phy_source_weighted': 'mparc.loss_phy_source'})
+        for key, value in values.items():
+            sampled = (key.startswith('doris.') and key != 'doris.phy_source_weighted') or \
+                '.edge_diag.' in key or '.edge_count.' in key or '.edge_quality.' in key
+            if sampled:
+                if not snapshot:
+                    continue
+                # MMCV averages sparse histories by sample count, not iteration.
+                # Use the current sampled scalar; never repeat or average old snapshots.
+                history = getattr(runner.log_buffer, 'val_history', {}).get(key, [])
+                if history:
+                    value = history[-1]
+            if key.startswith('doris.'):
+                if key not in names and key.split('.')[1] not in (
+                        'mparc', 'pbcr', 'teacher', 'schedule'):
+                    # Compatibility fields remain model-side; the paper view uses clear scopes.
+                    continue
+                name = names.get(key, key[len('doris.'):])
+            elif '.edge_diag.' in key or '.edge_count.' in key or '.edge_quality.' in key:
+                branch = 'mix' if key.startswith('mix.') else 'source'
+                scale = 'hr.' if '.hr.' in key else ''
+                leaf = key.rsplit('.', 1)[-1]
+                if '.edge_quality.' in key:
+                    leaf = ('local_boundary_' + leaf +
+                            ('_pseudo_agreement' if branch == 'mix' else ''))
+                elif '.edge_diag.' in key:
+                    leaf = 'loss_edge_' + leaf
+                name = 'pbcr.' + branch + '.' + scale + leaf
+            else:
+                name = names.get(key, key)
+                name = name.replace('mix.decode.', 'mix.').replace('decode.', 'source.')
+                name = name.replace('loss_struct_edge', 'loss_edge')
+                if name.startswith('mix.'):
+                    name = name.replace('loss_seg', 'loss_pseudo')
+            result[name] = value
+        return result
 
     def _log_info(self, log_dict, runner):
         # print exp name for users to distinguish experiments
@@ -175,8 +237,9 @@ class PrecisionLoggerHook(LoggerHook):
                 eta_sec = time_sec_avg * (runner.max_iters - runner.iter - 1)
                 eta_str = str(datetime.timedelta(seconds=int(eta_sec)))
                 log_str += f'eta: {eta_str}, '
-                log_str += f'time: {log_dict["time"]:.3f}, ' \
-                           f'data_time: {log_dict["data_time"]:.3f}, '
+                log_str += f'time: {log_dict["time"]:.3f}, '
+                if 'data_time' in log_dict:
+                    log_str += f'data_time: {log_dict["data_time"]:.3f}, '
                 # statistic memory
                 if 'memory' in log_dict:
                     log_str += f'memory: {log_dict["memory"]}, '
@@ -212,14 +275,20 @@ class PrecisionLoggerHook(LoggerHook):
                 # Existing MMSeg accuracy is already on a 0..100 scale.
                 val = f'{val:.2f}%'
             elif isinstance(val, float):
-                val = f'{val:.4f}'
+                val = (f'{val:.3e}' if 'loss' in name and 0 < abs(val) < 1e-4
+                       else f'{val:.4f}')
             item = f'{name}: {val}'
-            if minimal_train and name == 'loss':
+            if minimal_train and name in ('loss', 'loss_total'):
                 log_items.insert(0, item)
             elif not minimal_train or is_train_acc:
                 log_items.append(item)
+            elif getattr(self, 'paper_names', False) and name.startswith(
+                    ('mparc.', 'pbcr.', 'teacher.', 'schedule.')):
+                group = ('.'.join(name.split('.')[:3]) if name.startswith('pbcr.proto.')
+                         else name.split('.')[0])
+                detail_items.setdefault(group, []).append(item)
             elif 'loss' in name:
-                if name.startswith('decode.'):
+                if name.startswith(('decode.', 'source.')):
                     detail_items['source'].append(item)
                 elif name.startswith('mix.'):
                     detail_items['mix'].append(item)
@@ -258,6 +327,9 @@ class PrecisionLoggerHook(LoggerHook):
         if 'eval_iter_num' in runner.log_buffer.output:
             # this doesn't modify runner.iter and is regardless of by_epoch
             cur_iter = runner.log_buffer.output.pop('eval_iter_num')
+            if not self.by_epoch:
+                runner.log_buffer.output['eval_batches'] = cur_iter
+                cur_iter = runner.iter + 1
             # IterTimerHook can add `time` after evaluation cleared the buffer.
             # The explicit evaluation marker takes precedence over that timer.
             mode = 'val'
@@ -288,6 +360,8 @@ class PrecisionLoggerHook(LoggerHook):
                 log_dict['memory'] = self._get_max_memory(runner)
 
         log_dict = dict(log_dict, **runner.log_buffer.output)
+        if mode == 'train' and getattr(self, 'paper_names', False):
+            log_dict = self._paper_log_values(log_dict, runner)
         if mode == 'val':
             log_dict.pop('time', None)
             log_dict.pop('data_time', None)
@@ -296,7 +370,22 @@ class PrecisionLoggerHook(LoggerHook):
         self._dump_log(log_dict, runner)
         return log_dict
 
+    def after_train_iter(self, runner):
+        start = time.time()
+        if getattr(self, 'mechanism', None) is not None and not getattr(
+                runner, 'mechanism_snapshot_hook', False):
+            self.mechanism.consume()
+            # IterTimer ran before this logger. Exclude observation from the next
+            # iteration's data_time/time without resetting the CUDA peak statistic.
+            elapsed = time.time() - start
+            for hook in runner.hooks:
+                if hook.__class__.__name__ == 'IterTimerHook' and hasattr(hook, 't'):
+                    hook.t += elapsed
+        super(PrecisionLoggerHook, self).after_train_iter(runner)
+
     def after_run(self, runner):
+        if getattr(self, 'mechanism', None) is not None and runner.iter >= runner.max_iters:
+            self.mechanism.finish()
         # copy or upload logs to self.out_dir
         if self.out_dir is not None:
             for filename in scandir(runner.work_dir, self.out_suffix, True):
@@ -315,3 +404,18 @@ class PrecisionLoggerHook(LoggerHook):
                     runner.logger.info(
                         (f'{local_filepath} was removed due to the '
                          '`self.keep_local=False`'))
+
+
+class MechanismSnapshotHook(Hook):
+    """Run the existing collector before evaluation, keeping logger order unchanged."""
+
+    def after_train_iter(self, runner):
+        start = time.time()
+        for hook in runner.hooks:
+            collector = getattr(hook, 'mechanism', None)
+            if collector is not None:
+                collector.consume()
+        elapsed = time.time() - start
+        for hook in runner.hooks:
+            if hook.__class__.__name__ == 'IterTimerHook' and hasattr(hook, 't'):
+                hook.t += elapsed

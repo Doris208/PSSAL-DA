@@ -51,6 +51,22 @@ class GojiDataset(CustomDataset):
         self.valid_mask_size = [256, 256]
         self._log_index_cfg(kwargs['pipeline'])
 
+    def evaluate(self, results, metric='mIoU', logger=None, **kwargs):
+        eval_results = super(GojiDataset, self).evaluate(
+            results, metric=metric, logger=logger, **kwargs)
+        if all('IoU.' + name in eval_results for name in self.CLASSES):
+            # Macro means of the same per-class IoUs reported by the evaluator.
+            eval_results['Veg.mIoU'] = float(np.nanmean([
+                eval_results['IoU.goji'], eval_results['IoU.vegetation']]))
+            eval_results['NonVeg.mIoU'] = float(np.nanmean([
+                eval_results['IoU.building'], eval_results['IoU.water'],
+                eval_results['IoU.road']]))
+            print_log(
+                'Veg.mIoU: {:.2f}, NonVeg.mIoU: {:.2f}'.format(
+                    eval_results['Veg.mIoU'] * 100,
+                    eval_results['NonVeg.mIoU'] * 100), logger=logger)
+        return eval_results
+
     def _log_index_cfg(self, pipeline):
         logger = get_root_logger()
         print_log(

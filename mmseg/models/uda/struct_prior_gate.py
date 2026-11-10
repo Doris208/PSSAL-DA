@@ -28,6 +28,10 @@ class StructPriorConsistencyGate(nn.Module):
                  detach_gate=True,
                  ignore_index=255,
                  eps=1e-6,
+                 fusion_mode='legacy_product',
+                 continuity_weight=0.40,
+                 adjacency_weight=0.30,
+                 semantic_weight=0.30,
                  **kwargs):
         super().__init__()
         assert kernel_size == 3, 'Struct gate currently supports 3x3 kernels.'
@@ -53,6 +57,16 @@ class StructPriorConsistencyGate(nn.Module):
         self.detach_gate = detach_gate
         self.ignore_index = ignore_index
         self.eps = eps
+        if fusion_mode not in ('legacy_product', 'doris_confidence_guided'):
+            raise ValueError('Unknown structural fusion_mode: ' + fusion_mode)
+        self.fusion_mode = fusion_mode
+        self.continuity_weight = continuity_weight
+        self.adjacency_weight = adjacency_weight
+        self.semantic_weight = semantic_weight
+        if fusion_mode == 'doris_confidence_guided' and (
+                min(continuity_weight, adjacency_weight, semantic_weight) < 0 or
+                abs(continuity_weight + adjacency_weight + semantic_weight - 1) > 1e-6):
+            raise ValueError('Structural evidence weights must be nonnegative and sum to 1')
 
         kernel = torch.ones(1, 1, 3, 3)
         kernel[:, :, 1, 1] = 0
@@ -215,6 +229,31 @@ class StructPriorConsistencyGate(nn.Module):
         row_sum = adj.sum(dim=1, keepdim=True)
         return adj / row_sum.clamp_min(self.eps)
 
+    def fuse_doris_responses(self, confidence, continuity, adjacency, semantic,
+                             pseudo_label):
+        """Confidence-guided average of available, finite structural evidence."""
+        valid = self._valid_label(pseudo_label)
+        safe_label = pseudo_label.clamp(0, self.num_classes - 1)
+        adj_ready = (self.source_adj_initialized[safe_label] & valid &
+                     self.use_source_adjacency_ema)
+        sem_ready = (self.semantic_proto_initialized[safe_label] & valid &
+                     self.use_semantic_proto)
+        numerator = torch.zeros_like(confidence)
+        denominator = torch.zeros_like(confidence)
+        for coefficient, response, ready in (
+                (self.continuity_weight, continuity, valid),
+                (self.adjacency_weight, adjacency, adj_ready),
+                (self.semantic_weight, semantic, sem_ready)):
+            available = ready & torch.isfinite(response)
+            clean = torch.nan_to_num(response, nan=0.0, posinf=0.0,
+                                     neginf=0.0).clamp(0, 1)
+            numerator = numerator + coefficient * clean * available
+            denominator = denominator + coefficient * available
+        confidence = torch.nan_to_num(confidence, nan=0.0, posinf=0.0,
+                                       neginf=0.0).clamp(0, 1)
+        return (confidence * numerator /
+                denominator.clamp_min(self.eps)).clamp(0, 1)
+
     def apply(self,
               target_logits=None,
               target_probs=None,
@@ -226,7 +265,9 @@ class StructPriorConsistencyGate(nn.Module):
               iter=0,
               ignore_index=None,
               collect_debug=True,
-              log_stats=True):
+              log_stats=True,
+              target_confidence=None,
+              update_priors=True):
         if ignore_index is not None:
             self.ignore_index = ignore_index
         if target_probs is None:
@@ -237,19 +278,30 @@ class StructPriorConsistencyGate(nn.Module):
             pseudo_label = target_probs.argmax(dim=1)
         pseudo_label = self._as_label_map(pseudo_label)
 
-        with torch.no_grad():
-            self.update_source_adjacency(source_gt)
-            self.update_semantic_prototype(source_probs, source_gt)
+        if update_priors:
+            with torch.no_grad():
+                self.update_source_adjacency(source_gt)
+                self.update_semantic_prototype(source_probs, source_gt)
 
-        conf_t = target_probs.max(dim=1)[0]
+        conf_t = (target_confidence if target_confidence is not None else
+                  target_probs.max(dim=1)[0])
         r_cont = self.compute_continuity_score(pseudo_label)
         r_adj = self.compute_adjacency_score(pseudo_label)
         r_sem = self.compute_semantic_score(target_probs, pseudo_label)
-        r_struct = (
-            conf_t.clamp(0, 1).pow(self.confidence_power) *
-            r_cont.clamp(0, 1).pow(self.continuity_power) *
-            r_adj.clamp(0, 1).pow(self.adjacency_power) *
-            r_sem.clamp(0, 1).pow(self.semantic_power)).clamp(0, 1)
+        if self.fusion_mode == 'doris_confidence_guided':
+            r_struct = self.fuse_doris_responses(
+                conf_t, r_cont, r_adj, r_sem, pseudo_label)
+            # Keep exported inputs finite too; unavailable priors were excluded
+            # before sanitizing rather than treating their default ones as data.
+            conf_t, r_cont, r_adj, r_sem = [torch.nan_to_num(
+                value, nan=0.0, posinf=0.0, neginf=0.0).clamp(0, 1)
+                for value in (conf_t, r_cont, r_adj, r_sem)]
+        else:
+            r_struct = (
+                conf_t.clamp(0, 1).pow(self.confidence_power) *
+                r_cont.clamp(0, 1).pow(self.continuity_power) *
+                r_adj.clamp(0, 1).pow(self.adjacency_power) *
+                r_sem.clamp(0, 1).pow(self.semantic_power)).clamp(0, 1)
         if self.detach_gate:
             r_struct = r_struct.detach()
             r_cont = r_cont.detach()

@@ -3,6 +3,8 @@
 # - Add ddp_wrapper from mmgen
 
 import random
+import os.path as osp
+import re
 import warnings
 
 import mmcv
@@ -17,6 +19,7 @@ from mmseg.core import DistEvalHook, EvalHook
 from mmseg.core.ddp_wrapper import DistributedDataParallelWrapper
 from mmseg.datasets import build_dataloader, build_dataset
 from mmseg.utils import get_root_logger
+from mmseg.utils.checkpoint_policy import DorisCheckpointHook
 
 
 def set_random_seed(seed, deterministic=False):
@@ -47,6 +50,8 @@ def train_segmentor(model,
                     meta=None):
     """Launch segmentor training."""
     logger = get_root_logger(cfg.log_level)
+    from tools.doris_checkpoint_plan import configure_checkpoint_policy
+    doris_checkpoints = configure_checkpoint_policy(cfg)
 
     # prepare data loaders
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
@@ -120,8 +125,11 @@ def train_segmentor(model,
 
     # register hooks
     runner.register_training_hooks(cfg.lr_config, optimizer_config,
-                                   cfg.checkpoint_config, cfg.log_config,
+                                   None if doris_checkpoints else cfg.checkpoint_config, cfg.log_config,
                                    cfg.get('momentum_config', None))
+    if doris_checkpoints:
+        # Save after validation so either Best record is included in latest.
+        runner.register_hook(build_from_cfg(cfg.checkpoint_config, HOOKS), priority='LOW')
     if cfg.get('custom_hooks', None):
         for hook_cfg in cfg.custom_hooks:
             runner.register_hook(build_from_cfg(hook_cfg, HOOKS))
@@ -146,6 +154,28 @@ def train_segmentor(model,
     if cfg.resume_from:
         runner.resume_from = cfg.resume_from
         runner.resume(cfg.resume_from)
+        if cfg.get('uda', {}).get('type') == 'DACS':
+            if cfg.get('runner', {}).get('type') == 'IterBasedRunner':
+                checkpoint_name = osp.basename(osp.realpath(cfg.resume_from))
+                checkpoint_iter = re.fullmatch(r'(?:best_.+_)?iter_(\d+)\.pth', checkpoint_name)
+                completed = (int(checkpoint_iter.group(1)) if checkpoint_iter else
+                             runner.meta.get('doris_checkpoint', {}).get('completed_iter'))
+                if completed == runner.iter + 1:
+                    # MMCV 1.4 names the saved checkpoint after the completed
+                    # step but stores its zero-based counter in meta['iter'].
+                    runner._iter += 1
+                    runner._inner_iter = runner.iter
+                    logger.info('Corrected MMCV resume counter to %d completed iterations', runner.iter)
+            resumed_model = runner.model.module if hasattr(runner.model, 'module') else runner.model
+            resumed_model.local_iter = runner.iter
     elif cfg.load_from:
         runner.load_checkpoint(cfg.load_from)
+    if cfg.get('uda', {}).get('mechanism_logging', False):
+        # Resume may restore historical checkpoint meta; observations must use
+        # the effective configuration of this invocation, including CLI paths.
+        runner.mechanism_config = cfg
+        if cfg.uda.get('mechanism_online_plot', False):
+            from mmseg.utils.precision_logger import MechanismSnapshotHook
+            runner.register_hook(MechanismSnapshotHook(), priority='ABOVE_NORMAL')
+            runner.mechanism_snapshot_hook = True
     runner.run(data_loaders, cfg.workflow)

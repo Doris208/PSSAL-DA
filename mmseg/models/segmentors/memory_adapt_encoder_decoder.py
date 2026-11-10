@@ -68,7 +68,8 @@ class MemoryAdaptEncoderDecoder(BaseSegmentor):
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
-                 init_cfg=None):
+                 init_cfg=None,
+                 feature_upsample_scale=1):
         super(MemoryAdaptEncoderDecoder, self).__init__(init_cfg)
         if pretrained is not None:
             assert backbone.get('pretrained') is None
@@ -94,13 +95,20 @@ class MemoryAdaptEncoderDecoder(BaseSegmentor):
         self.align_corners = False
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
+        if feature_upsample_scale < 1:
+            raise ValueError('feature_upsample_scale must be >= 1')
+        self.feature_upsample_scale = feature_upsample_scale
 
     def extract_feat(self, img):
         return self.backbone(img)
 
     def _stage_features(self, img):
         feats = self.extract_feat(img)
-        return feats, feats[-1]
+        stage4 = feats[-1]
+        if self.feature_upsample_scale != 1:
+            stage4 = F.interpolate(stage4, scale_factor=self.feature_upsample_scale,
+                                   mode='bilinear', align_corners=False)
+        return feats, stage4
 
     def forward_memory(self, img, use_memory=True):
         feats, stage4 = self._stage_features(img)

@@ -172,22 +172,14 @@ class LoadGojiIndices(object):
         self._logged_stats = False
 
     def _load_index(self, filename):
+        from mmseg.vi_utils import prepare_goji_index
         img_bytes = self.file_client.get(filename)
         index = np.array(Image.open(BytesIO(img_bytes)))
-        if index.ndim == 3:
-            index = index[..., 0]
-        index = index.astype(np.float32)
-        return np.nan_to_num(index, nan=0.0, posinf=0.0, neginf=0.0)
+        return prepare_goji_index(index)
 
     def _normalize_index(self, index, index_name, norm_cfg):
-        if norm_cfg is None:
-            norm_cfg = {}
-        cfg = norm_cfg.get(index_name, norm_cfg)
-        min_val = cfg.get('min', -1.0)
-        max_val = cfg.get('max', 1.0)
-        index = np.clip(index, min_val, max_val)
-        index = (index - min_val) / max(max_val - min_val, 1e-6)
-        return index.astype(np.float32)
+        from mmseg.vi_utils import normalize_goji_index
+        return normalize_goji_index(index, index_name, norm_cfg)
 
     def __call__(self, results):
         if not results.get('use_indices', False) and \

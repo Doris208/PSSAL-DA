@@ -131,6 +131,9 @@ def main(args):
         cfg.load_from = args.load_from
     if args.resume_from is not None:
         cfg.resume_from = args.resume_from
+    from tools.doris_checkpoint_plan import configure_checkpoint_policy, check_output_directory
+    configure_checkpoint_policy(cfg)
+    check_output_directory(cfg)
     if args.gpu_ids is not None:
         cfg.gpu_ids = args.gpu_ids
     else:
@@ -170,6 +173,7 @@ def main(args):
                 dash_line)
     meta['env_info'] = env_info
     meta['git_commit'] = get_git_hash()
+    meta['input_config'] = osp.abspath(args.config)
     logger.info(f'Git commit: {meta["git_commit"]}')
 
     # log some basic info

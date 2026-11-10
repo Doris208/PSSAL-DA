@@ -269,7 +269,7 @@ class OutputControlTests(unittest.TestCase):
             self.assertEqual(rows[1]['mix.decode.hr.acc_seg'], 89.625)
             self.assertEqual(rows[2]['mIoU'], 0.361812345)
             self.assertEqual(rows[2]['Veg.mIoU'], 0.5)
-            self.assertIn('Iter(val) [286]', messages[-1])
+            self.assertIn('Iter(val) [1000]', messages[-1])
         self.assertFalse(hook._keep_train_key('mparc_pseudo_weight_mean', None))
         hook.paper_process_logging = True
         self.assertTrue(hook._keep_train_key('mparc_pseudo_weight_mean', None))

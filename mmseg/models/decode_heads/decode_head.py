@@ -185,7 +185,8 @@ class BaseDecodeHead(BaseModule, metaclass=ABCMeta):
                       train_cfg,
                       seg_weight=None,
                       struct_edge_weight=None,
-                      struct_prior_response=None):
+                      struct_prior_response=None,
+                      struct_edge_valid_mask=None):
         """Forward function for training.
         Args:
             inputs (list[Tensor]): List of multi-level img features.
@@ -206,8 +207,10 @@ class BaseDecodeHead(BaseModule, metaclass=ABCMeta):
                 inputs, struct_prior_response=struct_prior_response)
         except TypeError:
             seg_logits = self.forward(inputs)
+        boundary_kwargs = (dict(struct_edge_valid_mask=struct_edge_valid_mask)
+                           if struct_edge_valid_mask is not None else {})
         losses = self.losses(seg_logits, gt_semantic_seg, seg_weight,
-                             struct_edge_weight)
+                             struct_edge_weight, **boundary_kwargs)
         return losses
 
     def forward_test(self, inputs, img_metas, test_cfg):
@@ -239,7 +242,8 @@ class BaseDecodeHead(BaseModule, metaclass=ABCMeta):
                seg_logit,
                seg_label,
                seg_weight=None,
-               struct_edge_weight=None):
+               struct_edge_weight=None,
+               struct_edge_valid_mask=None):
         """Compute segmentation loss."""
         loss = dict()
         seg_logit = resize(
@@ -259,6 +263,15 @@ class BaseDecodeHead(BaseModule, metaclass=ABCMeta):
             if loss_name == 'loss_struct_edge' or \
                     loss_decode.__class__.__name__ == 'StructEdgeLoss':
                 kwargs['struct_edge_weight'] = struct_edge_weight
+                if struct_edge_valid_mask is not None:
+                    kwargs['struct_edge_valid_mask'] = struct_edge_valid_mask
             loss[loss_name] = loss_decode(seg_logit, seg_label, **kwargs)
-        loss['acc_seg'] = accuracy(seg_logit, seg_label)
+            if getattr(loss_decode, 'collect_diagnostics', False):
+                for name, value in loss_decode.last_diagnostics.items():
+                    prefix = ('edge_count.' if name.endswith('_count') else
+                              'edge_quality.' if name in ('precision', 'recall', 'f1')
+                              else 'edge_diag.')
+                    loss[prefix + name] = value.float()
+        loss['acc_seg'] = accuracy(
+            seg_logit, seg_label, ignore_index=self.ignore_index)
         return loss

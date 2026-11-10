@@ -219,7 +219,8 @@ class HRDAEncoderDecoder(EncoderDecoder):
                       seg_weight=None,
                       struct_edge_weight=None,
                       struct_prior_response=None,
-                      return_feat=False):
+                      return_feat=False,
+                      struct_edge_valid_mask=None):
         """Forward function for training.
 
         Args:
@@ -252,7 +253,8 @@ class HRDAEncoderDecoder(EncoderDecoder):
                                                       gt_semantic_seg,
                                                       seg_weight,
                                                       struct_edge_weight,
-                                                      struct_prior_response)
+                                                      struct_prior_response,
+                                                      struct_edge_valid_mask)
         losses.update(loss_decode)
 
         if self.decode_head.debug and prob_vis is not None:

@@ -3,7 +3,7 @@
 import torch.nn as nn
 
 
-def accuracy(pred, target, topk=1, thresh=None):
+def accuracy(pred, target, topk=1, thresh=None, ignore_index=None):
     """Calculate accuracy according to the prediction and target.
 
     Args:
@@ -14,6 +14,8 @@ def accuracy(pred, target, topk=1, thresh=None):
             correct ones. Defaults to 1.
         thresh (float, optional): If not None, predictions with scores under
             this threshold are considered incorrect. Default to None.
+        ignore_index (int, optional): Target value excluded from accuracy.
+            Default to None.
 
     Returns:
         float | tuple[float]: If the input ``topk`` is a single integer,
@@ -44,10 +46,15 @@ def accuracy(pred, target, topk=1, thresh=None):
     if thresh is not None:
         # Only prediction values larger than thresh are counted as correct
         correct = correct & (pred_value > thresh).t()
+    total = target.numel()
+    if ignore_index is not None:
+        valid_mask = target != ignore_index
+        correct = correct & valid_mask.unsqueeze(0)
+        total = valid_mask.sum().clamp_min(1)
     res = []
     for k in topk:
         correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-        res.append(correct_k.mul_(100.0 / target.numel()))
+        res.append(correct_k.mul_(100.0 / total))
     return res[0] if return_single else res
 
 

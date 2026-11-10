@@ -16,6 +16,7 @@
 import math
 import os
 import random
+import time
 from copy import deepcopy
 
 import mmcv
@@ -34,7 +35,7 @@ from mmseg.models.uda.masking_consistency_module import \
     MaskingConsistencyModule
 from mmseg.models.uda.uda_decorator import UDADecorator, get_module
 from mmseg.models.uda.phy_reliability import (PhyReliabilityHead,
-                                              masked_bce_loss)
+                                              masked_bce_loss, target_phy_loss)
 from mmseg.models.uda.proto_gate import ProtoGate
 from mmseg.models.uda.struct_prior_gate import StructPriorConsistencyGate
 from mmseg.models.losses.struct_edge_loss import label_to_edge
@@ -44,6 +45,7 @@ from mmseg.models.utils.dacs_transforms import (convert_to_norm, denorm,
                                                 strong_transform)
 from mmseg.models.utils.visualization import subplotimg
 from mmseg.utils.utils import downscale_label_ratio
+from mmseg.utils.mechanism import training_record
 
 
 def _params_equal(ema_model, model):
@@ -77,6 +79,23 @@ class DACS(UDADecorator):
             raise ValueError('output_mode must be minimal or diagnostic')
         self.log_debug_stats = self.output_mode == 'diagnostic'
         self.paper_process_logging = cfg.get('paper_process_logging', False)
+        self.doris_process_logging = cfg.get('doris_process_logging', False)
+        self.doris_log_interval = cfg.get('doris_log_interval', 50)
+        self.mechanism_logging = cfg.get('mechanism_logging', False)
+        self.mechanism_cfg = dict(
+            enabled=self.mechanism_logging,
+            summary_interval=cfg.get('mechanism_summary_interval', 500),
+            sample_interval=cfg.get('mechanism_sample_interval', 100),
+            probe_enabled=cfg.get('fixed_probe_enabled', False),
+            probe_interval=cfg.get('fixed_probe_interval', 500),
+            save_raw=cfg.get('mechanism_save_raw', True),
+            make_figures=cfg.get('mechanism_make_figures', True))
+        self.mechanism_cfg['physiology'] = cfg.get('physiology_collection', False)
+        self.mechanism_cfg['output_mode'] = cfg.get('mechanism_output_mode', 'branches')
+        self.mechanism_cfg['detailed_output'] = cfg.get('mechanism_detailed_output', False)
+        self.mechanism_cfg['online_plot'] = cfg.get('mechanism_online_plot', False)
+        self.mechanism_cfg['strict'] = cfg.get('mechanism_strict', True)
+        self.mechanism_records = []
         self.save_class_mix_debug = self.log_debug_stats and cfg.get(
             'save_class_mix_debug', False)
         self.max_iters = cfg['max_iters']
@@ -116,6 +135,17 @@ class DACS(UDADecorator):
         self.enable_struct_edge = self.struct_edge_cfg.get('enable', False)
         self.joint_gate_cfg = cfg.get('joint_gate_cfg', dict(enable=False))
         self.enable_joint_gate = self.joint_gate_cfg.get('enable', False)
+        self.edge_fusion_mode = self.struct_edge_cfg.get('edge_fusion_mode', 'legacy')
+        if self.edge_fusion_mode not in ('legacy', 'doris_reliable'):
+            raise ValueError('Unknown edge_fusion_mode: ' + self.edge_fusion_mode)
+        self.doris_edge = (self.enable_struct_edge and
+                           self.edge_fusion_mode == 'doris_reliable')
+        if self.struct_edge_cfg.get('pair_response_mode', 'legacy') not in (
+                'legacy', 'valid_boundary_only'):
+            raise ValueError('Unknown pair_response_mode')
+        if self.doris_edge and self.struct_edge_cfg.get(
+                'edge_weight_mode', 'struct') != 'paper_pbcr':
+            raise ValueError('doris_reliable requires edge_weight_mode=paper_pbcr')
         self.input_channel_order = cfg.get(
             'input_channel_order',
             ['B', 'G', 'R', 'NDVI', 'NDRE', 'CIRE'])
@@ -132,9 +162,13 @@ class DACS(UDADecorator):
             f'prototype={self.enable_proto}, '
             f'edge={self.enable_struct_edge}',
             'mmseg')
-        mmcv.print_log(
-            'Input channels/order: ' + ', '.join(self.input_channel_order),
-            'mmseg')
+        if 'source_input_channel_order' in cfg:
+            for domain in ('source', 'target'):
+                mmcv.print_log(domain + ' normalized input order: ' + ', '.join(
+                    cfg[domain + '_input_channel_order']), 'mmseg')
+        else:
+            mmcv.print_log(
+                'Input channels/order: ' + ', '.join(self.input_channel_order), 'mmseg')
         mmcv.print_log(
             'Class ids: ' + ', '.join(
                 f'{i}={name}' for i, name in enumerate(self.class_names)) +
@@ -166,6 +200,13 @@ class DACS(UDADecorator):
                 'apply_to_classes', self.phy_positive_classes)
             self.lambda_phy_src = self.phy_cfg.get('lambda_phy_src', 0.1)
             self.lambda_phy_tgt = self.phy_cfg.get('lambda_phy_tgt', 0.0)
+            self.phy_target_supervision_mode = self.phy_cfg.get(
+                'phy_target_supervision_mode', 'legacy')
+            if self.phy_target_supervision_mode not in ('legacy', 'balanced_high_conf'):
+                raise ValueError('Unknown phy_target_supervision_mode')
+            self.tau_conf_phy = self.phy_cfg.get('tau_conf_phy', self.pseudo_threshold)
+            self.phy_pos_weight = self.phy_cfg.get('phy_pos_weight', 0.5)
+            self.phy_neg_weight = self.phy_cfg.get('phy_neg_weight', 0.5)
             self.use_target_gate = self.phy_cfg.get('use_target_gate', True)
             self.phy_min_weight = self.phy_cfg.get('phy_min_weight', 0.5)
             self.phy_filter_threshold = self.phy_cfg.get(
@@ -216,6 +257,13 @@ class DACS(UDADecorator):
                                            self.paper_process_logging)
             proto_gate_cfg['collect_debug'] = self.save_proto_debug
             self.proto_gate = ProtoGate(**proto_gate_cfg)
+            if self.doris_process_logging:
+                mmcv.print_log(
+                    'PBCR prototype selection: tau_proto={} on w_t_ps (after MPARC, '
+                    'before PBCR); tau_conf_proto={}; min_pixels={}; '
+                    'DACS pseudo_threshold={} is separate.'.format(
+                        self.proto_gate.tau_proto, self.proto_gate.tau_conf_proto,
+                        self.proto_gate.min_pixels, self.pseudo_threshold), 'mmseg')
         else:
             self.proto_gate = None
 
@@ -340,6 +388,26 @@ class DACS(UDADecorator):
             self.joint_debug_dir = self.joint_gate_cfg.get(
                 'joint_debug_dir', 'phy_struct_gate_debug')
 
+        if self.doris_process_logging:
+            mmcv.print_log(
+                'Paper log: r_loc=R_continuity, r_prob=R_sem; '
+                'loss_phy_source_raw is unweighted; loss_phy_source includes lambda_phy_src. '
+                'Process fields are sampled snapshots, not accuracy metrics.', 'mmseg')
+            if self.enable_struct:
+                mmcv.print_log(
+                    'MPARC: r_struct=r_conf*(0.40*r_loc+0.30*r_adj+0.30*r_prob); '
+                    'uninitialized priors excluded and remaining weights renormalized; '
+                    'struct/feature warmup={}, ramp={}.'.format(
+                        self.struct_gate.struct_warmup_iters,
+                        self.struct_gate.struct_rampup_iters), 'mmseg')
+            if self.doris_edge:
+                mmcv.print_log(
+                    'PBCR: r_edge=0.45*e_prob+0.35*e_img+0.20*r_pair (Teacher target); '
+                    'source uses e_img; edge multiplier ramps from 0 to 1 over {} iters; '
+                    'lambda_src={}, lambda_tgt={}.'.format(
+                        self.struct_edge_warmup_iters, self.struct_edge_loss_weight_src,
+                        self.struct_edge_loss_weight_tgt), 'mmseg')
+
     def get_ema_model(self):
         return get_module(self.ema_model)
 
@@ -398,6 +466,7 @@ class DACS(UDADecorator):
         """
 
         optimizer.zero_grad()
+        observation_start = time.perf_counter() if getattr(self, 'mechanism_logging', False) else None
         log_vars = self(**data_batch)
         optimizer.step()
         # Sum already materialized loss scalars for reporting only. All
@@ -405,7 +474,9 @@ class DACS(UDADecorator):
         log_vars['loss'] = sum(
             value * (self.lambda_phy_src if name == 'loss_phy_src' else 1.0)
             for name, value in log_vars.items()
-            if 'loss' in name and name != 'loss')
+            if 'loss' in name and name != 'loss' and not name.startswith('doris.'))
+        if observation_start is not None:
+            log_vars['train_iter_time'] = time.perf_counter() - observation_start
 
         outputs = dict(
             log_vars=log_vars, num_samples=len(data_batch['img_metas']))
@@ -493,6 +564,11 @@ class DACS(UDADecorator):
         return feat_loss, feat_log
 
     def update_debug_state(self):
+        head = self.get_model().decode_head
+        if self.doris_process_logging and self.enable_struct_edge and hasattr(head, 'modules'):
+            for module in head.modules():
+                if module.__class__.__name__ == 'StructEdgeLoss':
+                    module.collect_diagnostics = self._doris_log_enabled()
         if self.save_class_mix_debug and self.debug_img_interval > 0 and \
                 self.local_iter % self.debug_img_interval == 0:
             self.get_model().decode_head.debug = True
@@ -566,7 +642,17 @@ class DACS(UDADecorator):
         target = self._class_mask(gt, self.phy_positive_classes).unsqueeze(1)
         valid = gt.ne(255).unsqueeze(1)
         loss_phy_src = masked_bce_loss(r_phy_src, target, valid)
+        if self._mechanism_sample_enabled() and (
+                self.mechanism_cfg['output_mode'] != 'branches' or self.mechanism_cfg['detailed_output']):
+            with torch.no_grad():
+                self.mechanism_phy_source = {
+                    'vegetation': (r_phy_src.detach()[valid & target].float().sum().item(),
+                                   int((valid & target).sum())),
+                    'nonvegetation': (r_phy_src.detach()[valid & ~target].float().sum().item(),
+                                      int((valid & ~target).sum()))}
         log_vars['loss_phy_src'] = loss_phy_src.item()
+        if self.doris_process_logging:
+            log_vars['doris.phy_source_weighted'] = self.lambda_phy_src * log_vars['loss_phy_src']
         if self.log_debug_stats:
             log_vars['phy_src_mean'] = r_phy_src.detach().mean().item()
         return r_phy_src, self.lambda_phy_src * loss_phy_src
@@ -601,7 +687,7 @@ class DACS(UDADecorator):
             gate = (1 - ramp) * torch.ones_like(gate) + ramp * gate
         phy_weight = torch.ones_like(pseudo_weight)
         veg_mask = self._class_mask(pseudo_label, self.phy_apply_to_classes)
-        phy_weight[veg_mask] = gate[veg_mask]
+        phy_weight[veg_mask] = gate[veg_mask].to(dtype=phy_weight.dtype)
         pseudo_weight = pseudo_weight * phy_weight
 
         if self.log_debug_stats:
@@ -762,7 +848,8 @@ class DACS(UDADecorator):
                                prefix + '_final_pseudo_weight.png')
 
     def _apply_struct_gate(self, ema_softmax, pseudo_label, pseudo_weight,
-                           gt_semantic_seg, log_vars, source_probs=None):
+                           gt_semantic_seg, log_vars, source_probs=None,
+                           target_confidence=None):
         pseudo_weight, struct_debug = self.struct_gate.apply(
             target_probs=ema_softmax,
             pseudo_label=pseudo_label,
@@ -773,7 +860,8 @@ class DACS(UDADecorator):
             ignore_index=255,
             collect_debug=(self.save_struct_debug or
                            (self.enable_joint_gate and self.save_joint_debug)),
-            log_stats=self.log_debug_stats)
+            log_stats=self.log_debug_stats,
+            target_confidence=target_confidence)
         self._log_struct_debug(struct_debug, log_vars)
         return pseudo_weight, struct_debug
 
@@ -999,7 +1087,7 @@ class DACS(UDADecorator):
 
     def _build_img_edge_response(self, img):
         eps = 1e-6
-        x = img.float()
+        x = (img[:, :3] if self.doris_edge else img).float()
         channels = x.shape[1]
         x_min = x.amin(dim=(2, 3), keepdim=True)
         x_max = x.amax(dim=(2, 3), keepdim=True)
@@ -1252,10 +1340,197 @@ class DACS(UDADecorator):
         return gate.unsqueeze(1).detach()
 
     def _build_boundary_pair_response(self, label):
+        if self.doris_edge:
+            return self._build_doris_boundary_pair_response(label)
         pair_gate = self._build_boundary_pair_gate(label)
         min_weight = max(float(self.struct_edge_pair_min_weight), 1e-6)
         response = (pair_gate - min_weight) / max(1.0 - min_weight, 1e-6)
         return response.clamp(0.0, 1.0)
+
+    def _build_doris_boundary_pair_response(self, label):
+        label = self._as_struct_edge_label(label)
+        response = label.new_zeros(label.shape, dtype=torch.float)
+        if not self.struct_edge_use_pair_prior or not self.struct_edge_pair_prior_ready.item():
+            return response.unsqueeze(1)
+        valid = self._valid_struct_edge_label(label)
+        count = torch.zeros_like(response)
+        prior = torch.nan_to_num(self.struct_edge_pair_prior.to(response),
+                                  nan=0.0, posinf=0.0, neginf=0.0).clamp(0, 1)
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            shifted = torch.roll(label, shifts=(dy, dx), dims=(1, 2))
+            shifted_valid = torch.roll(valid, shifts=(dy, dx), dims=(1, 2))
+            if dy > 0:
+                shifted_valid[:, :dy, :] = False
+            elif dy < 0:
+                shifted_valid[:, dy:, :] = False
+            if dx > 0:
+                shifted_valid[:, :, :dx] = False
+            elif dx < 0:
+                shifted_valid[:, :, dx:] = False
+            boundary = valid & shifted_valid & label.ne(shifted)
+            score = prior[label.clamp(0, self.struct_edge_num_classes - 1),
+                          shifted.clamp(0, self.struct_edge_num_classes - 1)]
+            if self.struct_edge_cfg.get('pair_response_mode', 'legacy') != 'valid_boundary_only':
+                score = score.pow(self.struct_edge_pair_power)
+            response = response + torch.where(boundary, score, torch.zeros_like(score))
+            count = count + boundary.float()
+        response = response / count.clamp_min(1)
+        if self.struct_edge_cfg.get('pair_response_mode', 'legacy') == 'valid_boundary_only':
+            return response.clamp(0, 1).unsqueeze(1).detach()
+        ramp = min(1.0, float(self.local_iter) /
+                   max(float(self.struct_edge_pair_warmup_iters), 1.0))
+        if self.struct_edge_pair_warmup_iters <= 0:
+            ramp = 1.0
+        return (response * ramp).clamp(0, 1).unsqueeze(1).detach()
+
+    def doris_edge_responses(self, img, label, target_probs=None):
+        """Shared by DORIS training and the independent response exporter."""
+        image = self._build_img_edge_response(img)
+        probability = (self._build_prob_edge_response(target_probs)
+                       if target_probs is not None else None)
+        pair = (self._build_boundary_pair_response(label)
+                if target_probs is not None else None)
+        numerator, denominator = torch.zeros_like(image), torch.zeros_like(image)
+        for coefficient, value in ((self.struct_edge_img_weight, image),
+                                   (self.struct_edge_prob_weight, probability),
+                                   (self.struct_edge_pair_weight, pair)):
+            if value is None:
+                continue
+            if value.shape[-2:] != image.shape[-2:]:
+                value = F.interpolate(value, size=image.shape[-2:], mode='bilinear',
+                                      align_corners=False)
+            available = torch.isfinite(value)
+            value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0).clamp(0, 1)
+            numerator = numerator + coefficient * value * available
+            denominator = denominator + coefficient * available
+        fused = (numerator / denominator.clamp_min(1e-6)).clamp(0, 1)
+        def finite_response(value):
+            return (torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0).clamp(0, 1)
+                    if value is not None else None)
+        return dict(E_img=finite_response(image), E_prob=finite_response(probability),
+                    R_pair=finite_response(pair), R_edge=fused)
+
+    def _doris_target_valid_mask(self, label, valid_pseudo_mask=None):
+        # Prototype/structure-only observation must not depend on edge attributes.
+        valid = ((label != getattr(self, 'struct_edge_ignore_index', 255)) &
+                 (label >= 0) & (label < getattr(
+                     self, 'struct_edge_num_classes', self.num_classes))).unsqueeze(1)
+        if valid_pseudo_mask is not None:
+            if valid_pseudo_mask.dim() == 3:
+                valid_pseudo_mask = valid_pseudo_mask.unsqueeze(1)
+            valid = valid & valid_pseudo_mask.gt(0)
+        if self.psweight_ignore_top > 0:
+            valid[:, :, :self.psweight_ignore_top] = False
+        if self.psweight_ignore_bottom > 0:
+            valid[:, :, -self.psweight_ignore_bottom:] = False
+        return valid.detach()
+
+    def mechanism_boundary(self, label):
+        """Observation only: reuse the exact boundary target extraction rule."""
+        return label_to_edge(label, self.struct_edge_ignore_index,
+                             self.struct_edge_radius).bool()
+
+    def _doris_mix_valid_mask(self, mix_mask, source_label, target_valid):
+        if mix_mask.dim() == 3:
+            mix_mask = mix_mask.unsqueeze(0)
+        source_valid = self._valid_struct_edge_label(source_label).reshape_as(mix_mask)
+        valid = torch.where(mix_mask.bool(), source_valid, target_valid.bool())
+        # Remove the synthetic seam plus the boundary-label and negative-ring
+        # receptive fields. This mask also blocks negative-weight propagation.
+        seam = label_to_edge(mix_mask[:, 0].long(),
+                             edge_radius=self.struct_edge_radius + 3).bool()
+        return (valid & ~seam).detach()
+
+    def _doris_log_enabled(self):
+        return (self.doris_process_logging and self.doris_log_interval > 0 and
+                (self.local_iter + 1) % self.doris_log_interval == 0)
+
+    def _mechanism_sample_enabled(self):
+        return (self.mechanism_logging and
+                (self.local_iter + 1) % self.mechanism_cfg['sample_interval'] == 0)
+
+    def _log_doris_process(self, confidence, label, pseudo_weight, valid_mask,
+                            struct_debug, log_vars, w_t_ps=None, w_t_phy=None,
+                            r_phy=None):
+        if not self._doris_log_enabled():
+            return
+        valid = (valid_mask[:, 0] if valid_mask is not None else
+                 label.ne(255))
+        high = confidence.ge(self.pseudo_threshold)
+        log_vars['doris.teacher_spatial_valid_ratio'] = valid.float().mean().item()
+        log_vars['doris.teacher_high_conf_ratio_valid'] = (
+            high[valid].float().mean().item() if valid.any() else 0.0)
+        for cls, name in ((0, 'goji'), (1, 'vegetation')):
+            pixels = valid & label.eq(cls)
+            log_vars[f'doris.teacher_{name}_prediction_ratio_valid'] = (
+                pixels.float().sum() / valid.sum().clamp_min(1)).item()
+            log_vars[f'doris.teacher_{name}_high_conf_ratio_given_class'] = (
+                high[pixels].float().mean().item() if pixels.any() else 0.0)
+            log_vars[f'doris.{name}_final_pseudo_weight_mean_valid'] = (
+                pseudo_weight[pixels].mean().item() if pixels.any() else 0.0)
+        if self.enable_proto:
+            log_vars['doris.target_prototype_valid_classes'] = \
+                self.proto_gate.target_valid_proto.float().sum().item()
+        if struct_debug is not None:
+            response = struct_debug['R_struct']
+            struct_mask = self._class_mask(label, self.struct_gate.struct_positive_classes) & valid
+            log_vars['doris.R_struct_mean_all'] = response.mean().item()
+            log_vars['doris.R_struct_mean_struct_classes_valid'] = (
+                response[struct_mask].mean().item() if struct_mask.any() else 0.0)
+        def mean_valid(value, mask=valid):
+            if value.dim() == 4:
+                value = value[:, 0]
+            return value[mask].mean().item() if mask.any() else 0.0
+        log_vars['doris.teacher.w_conf_mean'] = mean_valid(confidence)
+        log_vars['doris.teacher.dacs_high_conf_ratio_all'] = high.float().mean().item()
+        log_vars['doris.teacher.spatial_valid_ratio'] = valid.float().mean().item()
+        log_vars['doris.teacher.high_conf_ratio_valid'] = (
+            high[valid].float().mean().item() if valid.any() else 0.0)
+        for cls, name in enumerate(self.class_names):
+            pixels = valid & label.eq(cls)
+            log_vars['doris.teacher.' + name + '.prediction_ratio_valid'] = (
+                pixels.sum().float() / valid.sum().clamp_min(1)).item()
+            log_vars['doris.pbcr.proto.' + name + '.w_t_final_mean'] = mean_valid(pseudo_weight, pixels)
+        log_vars['doris.mparc.w_t_ps_mean'] = mean_valid(
+            w_t_ps if w_t_ps is not None else pseudo_weight)
+        log_vars['doris.pbcr.w_t_final_mean'] = mean_valid(pseudo_weight)
+        if w_t_phy is not None:
+            log_vars['doris.mparc.w_t_phy_mean'] = mean_valid(w_t_phy)
+        if r_phy is not None:
+            log_vars['doris.mparc.r_phy_mean'] = mean_valid(r_phy.detach())
+        if struct_debug is not None:
+            for name, value in (('r_conf', confidence),
+                                ('r_loc', struct_debug.get('R_continuity')),
+                                ('r_adj', struct_debug.get('R_adj')),
+                                ('r_prob', struct_debug.get('R_sem')),
+                                ('r_struct', struct_debug['R_struct'])):
+                if value is not None:
+                    log_vars['doris.mparc.' + name + '_mean'] = mean_valid(value)
+            for name, bank in (('adj', self.struct_gate.source_adj_initialized),
+                                ('prob', self.struct_gate.semantic_proto_initialized)):
+                log_vars['doris.mparc.' + name + '_ready_classes'] = bank.float().sum().item()
+            ratio = max(0.0, min(1.0, (self.local_iter - self.struct_gate.struct_warmup_iters) /
+                                  max(float(self.struct_gate.struct_rampup_iters), 1.0)))
+            log_vars['doris.schedule.struct_ramp'] = ratio
+            log_vars['doris.schedule.struct_feature_strength'] = 0.05 * ratio
+        if self.enable_struct_edge:
+            log_vars['doris.schedule.edge_ramp'] = self._struct_edge_warmup_ratio()
+        if self.enable_proto:
+            gate = self.proto_gate
+            log_vars['doris.pbcr.tau_proto'] = gate.tau_proto
+            log_vars['doris.pbcr.tau_conf_proto'] = gate.tau_conf_proto
+            log_vars['doris.schedule.proto_weight_active'] = float(self.local_iter >= gate.weight_start)
+            log_vars['doris.schedule.proto_loss_active'] = float(self.local_iter >= gate.loss_start)
+            for key, value in gate.last_target_diagnostics.items():
+                for cls, name in enumerate(self.class_names):
+                    key = key.replace('class_{}.'.format(cls), 'proto.' + name + '.')
+                log_vars['doris.pbcr.' + key] = (value.detach().item()
+                                               if torch.is_tensor(value) else value)
+            for cls, name in enumerate(self.class_names):
+                log_vars['doris.pbcr.proto.' + name + '.source_ready'] = float(
+                    gate.source_valid_proto[cls])
+                log_vars['doris.pbcr.proto.' + name + '.target_ready'] = float(
+                    gate.target_valid_proto[cls])
 
     def _parse_patch_position_from_meta(self, img_meta):
         filename = img_meta.get('ori_filename',
@@ -1438,12 +1713,56 @@ class DACS(UDADecorator):
                                   img_metas=None,
                                   target_probs=None,
                                   is_source=False,
-                                  is_target=False):
+                                  is_target=False,
+                                  target_confidence=None,
+                                  boundary_valid_mask=None):
         if not self.enable_struct_edge or not self.struct_edge_use_edge_loss:
             return None
         if is_source:
             self._update_boundary_pair_prior(label)
         warmup = self._struct_edge_warmup_ratio()
+        if self.doris_edge:
+            if is_target and target_probs is None:
+                raise ValueError('DORIS target boundary weighting requires Teacher probabilities')
+            responses = self.doris_edge_responses(
+                img, label, target_probs if is_target else None)
+            response = responses['R_edge']
+            if is_target and self._mechanism_sample_enabled():
+                self.mechanism_edge_response = response.detach()
+                self.mechanism_edge_components = {
+                    key: value.detach() for key, value in responses.items() if value is not None}
+            reliability = torch.ones_like(response)
+            if is_target:
+                confidence = (target_confidence if target_confidence is not None
+                              else target_probs.max(dim=1)[0])
+                if confidence.dim() == 3:
+                    confidence = confidence.unsqueeze(1)
+                confidence = torch.nan_to_num(confidence.detach(), nan=0.0,
+                                               posinf=0.0, neginf=0.0)
+                reliability = ((confidence - self.struct_edge_cfg.get('confidence_floor', 0.60)) /
+                               self.struct_edge_cfg.get('confidence_range', 0.35)).clamp(0, 1)
+            if boundary_valid_mask is not None:
+                reliability = reliability * boundary_valid_mask.detach().to(reliability)
+            if self._doris_log_enabled():
+                boundary = label_to_edge(label, self.struct_edge_ignore_index,
+                                          self.struct_edge_radius).bool()
+                boundary = boundary & self._valid_struct_edge_label(
+                    self._as_struct_edge_label(label)).unsqueeze(1)
+                if boundary_valid_mask is not None:
+                    boundary = boundary & boundary_valid_mask.bool()
+                log_vars[f'doris.R_edge_{prefix}_mean_all'] = response.mean().item()
+                log_vars[f'doris.R_edge_{prefix}_mean_valid_boundary'] = (
+                    response[boundary].mean().item() if boundary.any() else 0.0)
+                log_vars[f'doris.valid_boundary_ratio_{prefix}'] = boundary.float().mean().item()
+                for name, key in (('e_prob', 'E_prob'), ('e_img', 'E_img'),
+                                   ('r_pair', 'R_pair'), ('r_edge', 'R_edge')):
+                    value = responses.get(key)
+                    if value is not None:
+                        log_vars['doris.pbcr.' + prefix + '.' + name + '_mean_boundary'] = (
+                            value[boundary].mean().item() if boundary.any() else 0.0)
+                log_vars['doris.pbcr.' + prefix + '.reliability_mean_boundary'] = (
+                    reliability[boundary].mean().item() if boundary.any() else 0.0)
+            return (response * reliability * (loss_weight * warmup)).detach()
         if self.struct_edge_mode == 'paper_pbcr':
             img_edge = self._build_img_edge_response(img)
             prob_edge = (self._build_prob_edge_response(target_probs)
@@ -1683,7 +2002,7 @@ class DACS(UDADecorator):
         if self.log_debug_stats or self.paper_process_logging:
             log_vars['teacher_target_confidence_mean'] = \
                 teacher_target_confidence_map.mean().item()
-        if self.log_debug_stats:
+        if self.log_debug_stats and not self.doris_edge:
             retain_mask = teacher_target_confidence_map.ge(self.pseudo_threshold)
             if valid_pseudo_mask is not None:
                 teacher_pseudo_label_retain_ratio = valid_pseudo_mask.mean().item()
@@ -1737,7 +2056,9 @@ class DACS(UDADecorator):
                                    if self.enable_joint_gate else pseudo_weight)
             struct_pseudo_weight, struct_debug = self._apply_struct_gate(
                 ema_softmax, pseudo_label, struct_input_weight,
-                gt_semantic_seg, log_vars, source_probs=source_probs)
+                gt_semantic_seg, log_vars, source_probs=source_probs,
+                target_confidence=(teacher_target_confidence_map
+                    if self.struct_gate.fusion_mode == 'doris_confidence_guided' else None))
             if not self.enable_joint_gate:
                 pseudo_weight = struct_pseudo_weight
         struct_prior_response = None
@@ -1772,11 +2093,18 @@ class DACS(UDADecorator):
             log_vars['mparc_pseudo_weight_mean'] = pseudo_weight.detach().mean().item()
         target_feat = None
         proto_debug = None
+        w_t_ps = edge_conf_pseudo_weight
         if self.enable_proto:
+            self.proto_gate.collect_diagnostics = (
+                self._doris_log_enabled() or self._mechanism_sample_enabled())
+            if self.proto_gate.collect_diagnostics:
+                self.proto_gate.diagnostic_spatial_mask = self._doris_target_valid_mask(
+                    pseudo_label, valid_pseudo_mask)
             target_feat = self.get_model().extract_feat(target_img)
             proto_tgt_log = self.proto_gate.update_target(
                 target_feat, pseudo_label, teacher_target_confidence_map,
-                pseudo_weight, iter=self.local_iter)
+                w_t_ps, iter=self.local_iter)
+            self.proto_gate.diagnostic_spatial_mask = None
             self._log_proto_update('proto_tgt', proto_tgt_log, log_vars)
             with torch.no_grad():
                 proto_weight, proto_debug = self.proto_gate.compute_weight(
@@ -1791,6 +2119,12 @@ class DACS(UDADecorator):
             log_vars['final_pseudo_weight_mean'] = \
                 pseudo_weight.detach().mean().item()
         final_gate_pseudo_weight = pseudo_weight.detach().clone()
+        tgt_boundary_valid = (self._doris_target_valid_mask(pseudo_label, valid_pseudo_mask)
+                              if self.doris_edge else None)
+        self._log_doris_process(teacher_target_confidence_map, pseudo_label,
+                                pseudo_weight, (tgt_boundary_valid if self.doris_edge else
+                                                valid_pseudo_mask), struct_debug, log_vars,
+                                w_t_ps=w_t_ps, w_t_phy=phy_pseudo_weight, r_phy=r_phy_tgt)
         gt_pixel_weight = torch.ones((pseudo_weight.shape), device=dev)
         tgt_struct_edge_weight = self._build_struct_edge_weight(
             target_img,
@@ -1803,7 +2137,21 @@ class DACS(UDADecorator):
             vi=target_vi_img,
             img_metas=target_img_metas,
             target_probs=ema_softmax.detach(),
-            is_target=True) if self.enable_struct_edge else None
+            is_target=True,
+            target_confidence=teacher_target_confidence_map,
+            boundary_valid_mask=tgt_boundary_valid) if self.enable_struct_edge else None
+
+        if self._mechanism_sample_enabled():
+            self.mechanism_records.append(training_record(
+                self, teacher_target_confidence_map, pseudo_label, w_t_ps,
+                pseudo_weight, self._doris_target_valid_mask(pseudo_label, valid_pseudo_mask),
+                struct_debug, getattr(self, 'mechanism_edge_response', None),
+                tgt_struct_edge_weight, w_base=original_pseudo_weight,
+                w_t_phy=phy_pseudo_weight, r_phy=r_phy_tgt,
+                edge_components=getattr(self, 'mechanism_edge_components', None),
+                log_vars=log_vars))
+            if self.enable_struct_edge:
+                del self.mechanism_edge_response, self.mechanism_edge_components
 
         mixed_img, mixed_lbl, mix_masks = None, None, None
         if self.enable_mixing:
@@ -1815,6 +2163,7 @@ class DACS(UDADecorator):
             mixed_img, mixed_lbl = [None] * batch_size, [None] * batch_size
             mixed_struct_edge_weight = (
                 [None] * batch_size if self.enable_struct_edge else None)
+            mixed_boundary_valid = [] if self.doris_edge else None
             mixed_struct_prior_response = (
                 [None] * batch_size
                 if struct_prior_response is not None else None)
@@ -1836,6 +2185,9 @@ class DACS(UDADecorator):
                         target=torch.stack((
                             src_struct_edge_weight[i, 0],
                             tgt_struct_edge_weight[i, 0])))
+                    if self.doris_edge:
+                        mixed_boundary_valid.append(self._doris_mix_valid_mask(
+                            mix_masks[i], gt_semantic_seg[i], tgt_boundary_valid[i:i + 1]))
                 if struct_prior_response is not None:
                     source_prior = torch.ones_like(
                         struct_prior_response[i, 0])
@@ -1845,6 +2197,8 @@ class DACS(UDADecorator):
                             source_prior, struct_prior_response[i, 0])))
             mixed_img = torch.cat(mixed_img)
             mixed_lbl = torch.cat(mixed_lbl)
+            boundary_kwargs = (dict(struct_edge_valid_mask=torch.cat(mixed_boundary_valid))
+                               if self.doris_edge else {})
             if struct_prior_response is not None:
                 mixed_struct_prior_response = torch.cat(
                     mixed_struct_prior_response)
@@ -1872,12 +2226,15 @@ class DACS(UDADecorator):
                 pseudo_weight,
                 struct_edge_weight=mixed_struct_edge_weight,
                 struct_prior_response=mixed_struct_prior_response,
-                return_feat=False)
+                return_feat=False,
+                **boundary_kwargs)
             if self.save_class_mix_debug:
                 seg_debug['Mix'] = self.get_model().decode_head.debug_output
             mix_losses = add_prefix(mix_losses, 'mix')
             mix_loss, mix_log_vars = self._parse_losses(mix_losses)
         else:
+            boundary_kwargs = (dict(struct_edge_valid_mask=tgt_boundary_valid)
+                               if self.doris_edge else {})
             tgt_losses = self.get_model().forward_train(
                 target_img,
                 target_img_metas,
@@ -1885,7 +2242,8 @@ class DACS(UDADecorator):
                 pseudo_weight,
                 struct_edge_weight=tgt_struct_edge_weight,
                 struct_prior_response=struct_prior_response,
-                return_feat=False)
+                return_feat=False,
+                **boundary_kwargs)
             if self.save_class_mix_debug:
                 seg_debug['TargetSelfTrain'] = \
                     self.get_model().decode_head.debug_output
@@ -1920,14 +2278,20 @@ class DACS(UDADecorator):
             loss_proto_tgt.backward()
             del loss_proto_tgt, proto_loss_log, target_feat
         if self.enable_phy and self.lambda_phy_tgt > 0:
-            pseudo_veg_mask = self._class_mask(
-                pseudo_label, self.phy_positive_classes).unsqueeze(1)
-            high_conf = teacher_target_confidence_map.ge(
-                self.pseudo_threshold).unsqueeze(1)
-            valid = pseudo_veg_mask & high_conf
-            loss_phy_tgt = masked_bce_loss(r_phy_tgt, pseudo_veg_mask, valid)
+            loss_phy_tgt, phy_diag = target_phy_loss(
+                r_phy_tgt, pseudo_label, teacher_target_confidence_map,
+                valid_mask=self._doris_target_valid_mask(pseudo_label, valid_pseudo_mask),
+                mode=self.phy_target_supervision_mode, threshold=self.tau_conf_phy,
+                positive_classes=self.phy_positive_classes, num_classes=self.num_classes,
+                pos_weight=self.phy_pos_weight, neg_weight=self.phy_neg_weight)
             loss_phy_tgt = self.lambda_phy_tgt * loss_phy_tgt
             log_vars['loss_phy_tgt'] = loss_phy_tgt.item()
+            if self._mechanism_sample_enabled() and (
+                    self.mechanism_cfg['output_mode'] != 'branches' or self.mechanism_cfg['detailed_output']):
+                record = self.mechanism_records[-1]
+                record['phy_losses']['loss_phy_tgt'] = log_vars['loss_phy_tgt']
+                for name, value in phy_diag.items():
+                    record['phy_losses'][name] = value.item()
             loss_phy_tgt.backward()
 
         if self.enable_phy:

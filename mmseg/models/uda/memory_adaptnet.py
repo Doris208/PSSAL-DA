@@ -16,7 +16,7 @@ from mmseg.ops import resize
 
 @UDA.register_module()
 class MemoryAdaptNet(UDADecorator):
-    """UDA wrapper for MemoryAdaptNet-R101 + 3VI."""
+    """UDA wrapper for MemoryAdaptNet + 3VI."""
 
     def __init__(self, **cfg):
         super(MemoryAdaptNet, self).__init__(**cfg)
@@ -31,6 +31,7 @@ class MemoryAdaptNet(UDADecorator):
         self.lambda_stage1 = cfg.get('lambda_stage1', 1.0)
         self.lambda_stage2 = cfg.get('lambda_stage2', 1.0)
         self.lambda_adv = cfg.get('lambda_adv', 0.001)
+        self.log_train_accuracy = cfg.get('log_train_accuracy', False)
         self.source_domain_label = cfg.get('source_domain_label', 0.0)
         self.target_domain_label = cfg.get('target_domain_label', 1.0)
         self.lr_d_power = cfg.get('lr_d_power', 1.0)
@@ -69,11 +70,17 @@ class MemoryAdaptNet(UDADecorator):
             size=image_shape,
             mode='bilinear',
             align_corners=False)
-        return {
+        losses = {
             name:
             weight * F.cross_entropy(
                 logits, labels.squeeze(1).long(), ignore_index=self.ignore_index)
         }
+        if self.log_train_accuracy:
+            # Match the existing MMSeg acc_seg denominator and percent scale.
+            prediction = logits.detach().argmax(dim=1)
+            losses[name.replace('loss_seg_', '') + '.acc_seg'] = (
+                prediction.eq(labels.squeeze(1)).float().mean() * 100)
+        return losses
 
     def _target_filtered_pseudo(self, logits):
         prob = F.softmax(logits.detach(), dim=1)

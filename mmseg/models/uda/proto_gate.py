@@ -14,8 +14,8 @@ class ProtoGate(nn.Module):
                  source_update=True,
                  target_update=True,
                  target_update_start=3000,
-                 target_conf_thr=0.90,
-                 target_weight_thr=0.70,
+                 target_conf_thr=None,
+                 target_weight_thr=None,
                  proto_min_weight=0.80,
                  proto_temp=0.10,
                  proto_margin_thr=0.02,
@@ -34,7 +34,9 @@ class ProtoGate(nn.Module):
                  separate_domain_prototypes=False,
                  prototype_fusion_weight=0.5,
                  log_stats=True,
-                 collect_debug=True):
+                 collect_debug=True,
+                 tau_proto=None,
+                 tau_conf_proto=None):
         super().__init__()
         self.num_classes = num_classes
         self.ignore_index = ignore_index
@@ -43,8 +45,19 @@ class ProtoGate(nn.Module):
         self.source_update = source_update
         self.target_update = target_update
         self.target_update_start = target_update_start
-        self.target_conf_thr = target_conf_thr
-        self.target_weight_thr = target_weight_thr
+        for name, value, alias in (('tau_proto', tau_proto, target_weight_thr),
+                                   ('tau_conf_proto', tau_conf_proto, target_conf_thr)):
+            if value is not None and alias is not None and value != alias:
+                raise ValueError(name + ' conflicts with its legacy threshold alias')
+        self.tau_proto = (tau_proto if tau_proto is not None else
+                          target_weight_thr if target_weight_thr is not None else 0.70)
+        self.tau_conf_proto = (tau_conf_proto if tau_conf_proto is not None else
+                               target_conf_thr if target_conf_thr is not None else 0.90)
+        self.target_conf_thr = self.tau_conf_proto
+        self.target_weight_thr = self.tau_proto
+        self.collect_diagnostics = False
+        self.diagnostic_spatial_mask = None
+        self.last_target_diagnostics = {}
         self.proto_min_weight = proto_min_weight
         self.proto_temp = proto_temp
         self.proto_margin_thr = proto_margin_thr
@@ -75,6 +88,20 @@ class ProtoGate(nn.Module):
                              torch.zeros(num_classes, dtype=torch.bool))
         self.register_buffer('target_valid_proto',
                              torch.zeros(num_classes, dtype=torch.bool))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Checkpoints contain populated banks; a fresh module starts with empty
+        # buffers. Allocate the saved shape before the normal loader copies it.
+        for name in ('prototypes', 'source_prototypes', 'target_prototypes'):
+            saved = state_dict.get(prefix + name)
+            current = getattr(self, name)
+            if saved is not None and current.numel() == 0 and saved.ndim == 2 \
+                    and saved.shape[0] == self.num_classes:
+                setattr(self, name, torch.empty(saved.shape, device=current.device,
+                                               dtype=current.dtype))
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                      missing_keys, unexpected_keys, error_msgs)
 
     def _select_feat(self, feat):
         if isinstance(feat, dict):
@@ -203,16 +230,49 @@ class ProtoGate(nn.Module):
 
     def update_target(self, feat, pseudo_label, pseudo_conf, pseudo_weight,
                       iter=None):
-        if not self.target_update or iter is None or \
-                iter < self.target_update_start:
+        update_active = (self.target_update and iter is not None and
+                         iter >= self.target_update_start)
+        self.last_target_diagnostics = {}
+        if not update_active and not self.collect_diagnostics:
             return self._empty_update_log(feat)
         feat_sel = self._select_feat(feat)
         size = feat_sel.shape[-2:]
         label = self._resize_label(pseudo_label, size)
         conf = self._resize_map(pseudo_conf, size)
         weight = self._resize_map(pseudo_weight, size)
-        valid = conf.ge(self.target_conf_thr) & weight.ge(
-            self.target_weight_thr) & label.ne(self.ignore_index)
+        valid = conf.ge(self.tau_conf_proto) & weight.ge(
+            self.tau_proto) & label.ne(self.ignore_index)
+        if self.collect_diagnostics:
+            diagnostics = self.last_target_diagnostics
+            diagnostics['target_update_active'] = float(update_active)
+            support = label.ne(self.ignore_index)
+            if self.diagnostic_spatial_mask is not None:
+                # Same bilinear support as w_t_ps: exclude wholly invalid cells,
+                # retain partial support that can genuinely pass the threshold.
+                support = support & self._resize_map(
+                    self.diagnostic_spatial_mask.float(), size).gt(0)
+            for cls in range(self.num_classes):
+                candidate = label.eq(cls) & support
+                selected = candidate & valid
+                count = selected.sum()
+                prefix = 'class_{}.'.format(cls)
+                diagnostics[prefix + 'candidate_ratio'] = candidate.float().mean()
+                denom = candidate.sum().clamp_min(1)
+                diagnostics[prefix + 'conf_pass_ratio'] = (
+                    candidate & conf.ge(self.tau_conf_proto)).sum().float() / denom
+                diagnostics[prefix + 'confidence_pass_count'] = (
+                    candidate & conf.ge(self.tau_conf_proto)).sum()
+                diagnostics[prefix + 'w_t_ps_pass_ratio'] = (
+                    candidate & weight.ge(self.tau_proto)).sum().float() / denom
+                diagnostics[prefix + 'weight_pass_count'] = (
+                    candidate & weight.ge(self.tau_proto)).sum()
+                diagnostics[prefix + 'selected_ratio'] = count.float() / denom
+                diagnostics[prefix + 'candidate_count'] = candidate.sum()
+                diagnostics[prefix + 'selected_count'] = count
+                diagnostics[prefix + 'updated_count'] = (
+                    count * count.ge(self.min_pixels) * int(update_active))
+        if not update_active:
+            return self._empty_update_log(feat)
         return self._update_from_mask(feat_sel, label, valid, domain='target')
 
     @torch.no_grad()
@@ -235,9 +295,9 @@ class ProtoGate(nn.Module):
             self.prototypes[cls] = F.normalize(proto, dim=0)
             self.valid_proto[cls] = True
 
-    def _similarity(self, feat):
+    def _similarity(self, feat, read_only=False):
         feat = self._select_feat(feat)
-        if self.separate_domain_prototypes:
+        if self.separate_domain_prototypes and not read_only:
             self._refresh_fused_prototypes()
         feat_norm = F.normalize(feat, dim=1)
         proto_norm = F.normalize(self.prototypes.detach(), dim=1)
@@ -273,7 +333,7 @@ class ProtoGate(nn.Module):
                     if mask.any() else margin.new_tensor(0.0))
         return debug
 
-    def compute_weight(self, feat, pseudo_label, out_size=None, iter=None):
+    def compute_weight(self, feat, pseudo_label, out_size=None, iter=None, read_only=False):
         feat = self._select_feat(feat)
         size = out_size if out_size is not None else pseudo_label.shape[-2:]
         if iter is not None and iter < self.weight_start:
@@ -291,7 +351,7 @@ class ProtoGate(nn.Module):
             return weight, debug
 
         label = self._resize_label(pseudo_label, feat.shape[-2:])
-        sim = self._similarity(feat)
+        sim = self._similarity(feat, read_only=read_only)
         safe_label = label.clamp(0, self.num_classes - 1)
         class_sim = sim.gather(1, safe_label.unsqueeze(1)).squeeze(1)
         if self.valid_proto.sum() >= 2:
