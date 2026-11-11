@@ -47,7 +47,12 @@ def check_config(path, expected=None):
     edge_losses = [loss for loss in losses if loss.type == 'StructEdgeLoss']
     assert len(edge_losses) == int(flags[3]), path
     if flags[1]:
-        assert cfg.uda.struct_cfg.fusion_mode == 'doris_confidence_guided', path
+        if DIRECTION in cfg.name:
+            from tools.check_doris_stage1_ablation_configs import STRUCT_V2_OVERRIDES
+            for key, value in STRUCT_V2_OVERRIDES.items():
+                assert cfg.uda.struct_cfg[key] == value, (path, key)
+        else:
+            assert cfg.uda.struct_cfg.fusion_mode == 'doris_confidence_guided', path
         assert interaction.gamma_struct == .05, path
     if flags[2]:
         assert cfg.uda.proto_cfg.tau_proto == .25 and cfg.uda.proto_cfg.tau_conf_proto == .88, path
@@ -73,7 +78,11 @@ def check_config(path, expected=None):
                         phy_target_supervision_mode='balanced_high_conf')
         for key, value in required.items():
             assert cfg.uda.phy_cfg[key] == value, (path, key)
-        assert '/doris_hphy_early4k/' in cfg.work_dir and cfg.work_dir.endswith('_hphy_early4k'), path
+        if DIRECTION not in cfg.name:
+            assert '/doris_hphy_early4k/' in cfg.work_dir and cfg.work_dir.endswith('_hphy_early4k'), path
+    if DIRECTION in cfg.name:
+        expected_work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/' + DIRECTION + '/' + Path(path).stem[6:]
+        assert cfg.work_dir == expected_work_dir, path
     return cfg, dict(config=Path(path).relative_to(ROOT).as_posix(),
                      iterations=cfg.runner.max_iters, channels=cfg.model.backbone.in_chans,
                      flags=flags, phy_mode=cfg.uda.phy_cfg.get('mode', 'disabled'),
@@ -100,7 +109,7 @@ def main():
         if args.experiment not in ('all', str(number)):
             continue
         row.update(number=number, name=name, launch_work_dir=(
-            '/root/shared-nvme/work_dirs/doris_hphy_early4k/' + DIRECTION + '/'
+            '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/' + DIRECTION + '/'
             + DIRECTION + '_hrda_3vi' + suffix))
         rows.append(row)
     if args.all_directions:

@@ -30,7 +30,7 @@ uda.update(
     fixed_probe_interval=500, fixed_probe_max_samples=1, fixed_probe_index=0,
     mechanism_save_raw=True, mechanism_make_figures=True)
 
-work_dir = '/root/shared-nvme/work_dirs/doris_stage1/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_ps_proto'
+work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_ps_proto'
 name = 'doris_goji26RGB2goji30RGB_hrda_3vi_ps_proto'
 exp = 'doris_stage1_ablation'
 name_uda = 'doris_prototype'

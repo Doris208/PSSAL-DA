@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
+
+from tools.struct_schedule import struct_gate_strength
 
 
 class StructPriorConsistencyGate(nn.Module):
@@ -32,6 +35,15 @@ class StructPriorConsistencyGate(nn.Module):
                  continuity_weight=0.40,
                  adjacency_weight=0.30,
                  semantic_weight=0.30,
+                 confidence_weight=0.15,
+                 adjacency_mode='legacy',
+                 semantic_score_mode='legacy_cosine',
+                 adj_cross_uniform_smoothing=0.10,
+                 adj_min_cross_mass=0.01,
+                 semantic_temperature=0.15,
+                 struct_gate_schedule='legacy_warmup_linear',
+                 struct_gate_initial_strength=0.10,
+                 struct_gate_full_iter=4000,
                  **kwargs):
         super().__init__()
         assert kernel_size == 3, 'Struct gate currently supports 3x3 kernels.'
@@ -57,12 +69,34 @@ class StructPriorConsistencyGate(nn.Module):
         self.detach_gate = detach_gate
         self.ignore_index = ignore_index
         self.eps = eps
-        if fusion_mode not in ('legacy_product', 'doris_confidence_guided'):
+        if fusion_mode not in ('legacy_product', 'doris_confidence_guided', 'struct_distinct_v1'):
             raise ValueError('Unknown structural fusion_mode: ' + fusion_mode)
         self.fusion_mode = fusion_mode
         self.continuity_weight = continuity_weight
         self.adjacency_weight = adjacency_weight
         self.semantic_weight = semantic_weight
+        self.confidence_weight = confidence_weight
+        if adjacency_mode not in ('legacy', 'cross_class_conditional_v1'):
+            raise ValueError('Unknown adjacency_mode: '+adjacency_mode)
+        if semantic_score_mode not in ('legacy_cosine', 'probability_margin_v1'):
+            raise ValueError('Unknown semantic_score_mode: '+semantic_score_mode)
+        if (not math.isfinite(adj_cross_uniform_smoothing) or not 0 <= adj_cross_uniform_smoothing <= 1 or
+                not math.isfinite(adj_min_cross_mass) or adj_min_cross_mass < 0 or
+                not math.isfinite(semantic_temperature) or semantic_temperature <= 0):
+            raise ValueError('Invalid Structural cross-adjacency or semantic parameters')
+        self.adjacency_mode = adjacency_mode
+        self.semantic_score_mode = semantic_score_mode
+        self.adj_cross_uniform_smoothing = adj_cross_uniform_smoothing
+        self.adj_min_cross_mass = adj_min_cross_mass
+        self.semantic_temperature = semantic_temperature
+        self.struct_gate_schedule = struct_gate_schedule
+        self.struct_gate_initial_strength = struct_gate_initial_strength
+        self.struct_gate_full_iter = struct_gate_full_iter
+        self.gate_strength(0)
+        if fusion_mode == 'struct_distinct_v1':
+            weights = (confidence_weight, continuity_weight, adjacency_weight, semantic_weight)
+            if any(not math.isfinite(value) or value < 0 for value in weights) or abs(sum(weights)-1) > 1e-6:
+                raise ValueError('Four Structural evidence weights must be finite, nonnegative and sum to 1')
         if fusion_mode == 'doris_confidence_guided' and (
                 min(continuity_weight, adjacency_weight, semantic_weight) < 0 or
                 abs(continuity_weight + adjacency_weight + semantic_weight - 1) > 1e-6):
@@ -79,6 +113,17 @@ class StructPriorConsistencyGate(nn.Module):
                              torch.zeros(num_classes, dtype=torch.bool))
         self.register_buffer('semantic_proto_initialized',
                              torch.zeros(num_classes, dtype=torch.bool))
+
+    def gate_strength(self, iteration):
+        return struct_gate_strength(iteration, self.struct_gate_schedule,
+            self.struct_warmup_iters, self.struct_rampup_iters,
+            self.struct_gate_initial_strength, self.struct_gate_full_iter)
+
+    def feature_strength(self, iteration, warmup=None, rampup=None):
+        if self.struct_gate_schedule == 'early_nonzero_linear':
+            return self.gate_strength(iteration)
+        return struct_gate_strength(iteration, warmup=self.struct_warmup_iters if warmup is None else warmup,
+                                    rampup=self.struct_rampup_iters if rampup is None else rampup)
 
     def _as_label_map(self, label):
         if label.dim() == 4 and label.size(1) == 1:
@@ -146,7 +191,10 @@ class StructPriorConsistencyGate(nn.Module):
             self.source_adj_initialized[rows] = True
         return self.source_adj_ema
 
-    def compute_adjacency_score(self, pseudo_label):
+    def compute_adjacency_score(self, pseudo_label, return_details=False):
+        if self.adjacency_mode == 'cross_class_conditional_v1':
+            score, details = self.compute_cross_class_adjacency(pseudo_label)
+            return (score, details) if return_details else score
         pseudo_label = self._as_label_map(pseudo_label)
         neigh_frac, _, valid = self.compute_local_neighbor_distribution(
             pseudo_label)
@@ -159,7 +207,34 @@ class StructPriorConsistencyGate(nn.Module):
         adj_rows = adj_rows.permute(0, 3, 1, 2)
         score = (adj_rows * neigh_frac).sum(dim=1)
         ready = row_ready[safe_label] & valid
-        return torch.where(ready, score, torch.ones_like(score))
+        result = torch.where(ready, score, torch.ones_like(score))
+        return (result, dict(adjacency_available=ready)) if return_details else result
+
+    def compute_cross_class_adjacency(self, pseudo_label):
+        label = self._as_label_map(pseudo_label)
+        _, counts, valid = self.compute_local_neighbor_distribution(label)
+        safe = label.clamp(0, self.num_classes-1)
+        cross_counts = counts.float().clone()
+        cross_counts.scatter_(1, safe.unsqueeze(1), 0)
+        cross_count = cross_counts.sum(1)
+        source = self.source_adj_ema.float()
+        diagonal = torch.eye(self.num_classes, device=source.device, dtype=torch.bool)
+        cross = source.masked_fill(diagonal, 0)
+        mass = cross.sum(1)
+        source_ready = (self.source_adj_initialized & torch.isfinite(source).all(1) &
+                        (source >= 0).all(1) & (mass >= self.adj_min_cross_mass) & (mass > 0))
+        source_ready = source_ready[safe] & valid & self.use_source_adjacency_ema
+        prior = cross/mass[:, None].clamp_min(self.eps)
+        prior = ((1-self.adj_cross_uniform_smoothing)*prior +
+                 self.adj_cross_uniform_smoothing/(self.num_classes-1)*(~diagonal))
+        prior = prior.masked_fill(diagonal, 0)
+        prior_pixels = prior[safe].permute(0, 3, 1, 2)
+        distribution = cross_counts/cross_count[:, None].clamp_min(self.eps)
+        score = (distribution*prior_pixels).clamp_min(0).sqrt().sum(1).clamp(0, 1)
+        ready = source_ready & (cross_count > 0) & torch.isfinite(score)
+        score = torch.where(ready, score, torch.ones_like(score))
+        return score, dict(adjacency_available=ready,
+            source_cross_prior_available=source_ready, target_cross_neighbor_count=cross_count)
 
     @torch.no_grad()
     def update_semantic_prototype(self, source_probs, source_gt):
@@ -192,9 +267,13 @@ class StructPriorConsistencyGate(nn.Module):
                 self.semantic_proto_initialized[c] = True
         return self.semantic_proto_ema
 
-    def compute_semantic_score(self, target_probs, pseudo_label):
+    def compute_semantic_score(self, target_probs, pseudo_label, return_details=False):
+        if self.semantic_score_mode == 'probability_margin_v1':
+            score, ready = self.compute_probability_margin(target_probs, pseudo_label)
+            return (score, dict(semantic_available=ready)) if return_details else score
         if not self.use_semantic_proto:
-            return target_probs.new_ones(pseudo_label.shape)
+            result = target_probs.new_ones(pseudo_label.shape)
+            return (result, dict(semantic_available=torch.zeros_like(pseudo_label, dtype=torch.bool))) if return_details else result
         pseudo_label = self._as_label_map(pseudo_label)
         proto = self.semantic_proto_ema.to(device=target_probs.device,
                                            dtype=target_probs.dtype)
@@ -206,7 +285,41 @@ class StructPriorConsistencyGate(nn.Module):
         score = F.cosine_similarity(target_probs, proto_pix, dim=1, eps=self.eps)
         score = score.clamp(0.0, 1.0)
         ready = ready_rows[safe_label] & self._valid_label(pseudo_label)
-        return torch.where(ready, score, torch.ones_like(score))
+        result = torch.where(ready, score, torch.ones_like(score))
+        return (result, dict(semantic_available=ready)) if return_details else result
+
+    def compute_probability_margin(self, target_probs, pseudo_label):
+        label = self._as_label_map(pseudo_label)
+        valid = self._valid_label(label)
+        safe = label.clamp(0, self.num_classes-1)
+        with torch.cuda.amp.autocast(enabled=False):
+            probabilities = target_probs.float()
+            proto = self.semantic_proto_ema.float()
+            rows_ready = (self.semantic_proto_initialized & torch.isfinite(proto).all(1) &
+                          (proto.norm(dim=1) > self.eps) & self.use_semantic_proto)
+            clean_proto = torch.where(rows_ready[:, None], proto, torch.zeros_like(proto))
+            similarities = torch.einsum('bchw,kc->bkhw',
+                F.normalize(probabilities, dim=1, eps=self.eps),
+                F.normalize(clean_proto, dim=1, eps=self.eps)).clamp(0, 1)
+            current = similarities.gather(1, safe[:, None])[:, 0]
+            competitor = rows_ready[None, :, None, None] & ~F.one_hot(safe, self.num_classes).permute(0, 3, 1, 2).bool()
+            best = similarities.masked_fill(~competitor, -1).max(1)[0]
+            ready = valid & rows_ready[safe] & competitor.any(1) & torch.isfinite(probabilities).all(1)
+            score = torch.sigmoid((current-best)/self.semantic_temperature)
+            return torch.where(ready, score, torch.ones_like(score)), ready
+
+    def fuse_distinct_responses(self, responses, availability):
+        numerator = torch.zeros_like(responses[0], dtype=torch.float32)
+        denominator = torch.zeros_like(numerator)
+        masks = []
+        for coefficient, response, available in zip((self.confidence_weight, self.continuity_weight,
+                self.adjacency_weight, self.semantic_weight), responses, availability):
+            usable = available & torch.isfinite(response)
+            clean = torch.nan_to_num(response.float()).clamp(0, 1)
+            numerator = numerator+coefficient*clean*usable
+            denominator = denominator+coefficient*usable
+            masks.append(usable)
+        return (numerator/(denominator+self.eps)).clamp(0, 1), masks
 
     def _class_mask(self, label, classes):
         class_tensor = torch.tensor(classes, device=label.device)
@@ -286,9 +399,19 @@ class StructPriorConsistencyGate(nn.Module):
         conf_t = (target_confidence if target_confidence is not None else
                   target_probs.max(dim=1)[0])
         r_cont = self.compute_continuity_score(pseudo_label)
-        r_adj = self.compute_adjacency_score(pseudo_label)
-        r_sem = self.compute_semantic_score(target_probs, pseudo_label)
-        if self.fusion_mode == 'doris_confidence_guided':
+        r_adj, adjacency_details = self.compute_adjacency_score(pseudo_label, return_details=True)
+        r_sem, semantic_details = self.compute_semantic_score(target_probs, pseudo_label, return_details=True)
+        evidence = dict(adjacency_details, **semantic_details)
+        if self.fusion_mode == 'struct_distinct_v1':
+            _, counts, valid = self.compute_local_neighbor_distribution(pseudo_label)
+            available = (valid, valid & (counts.sum(1) > 0), evidence['adjacency_available'], evidence['semantic_available'])
+            r_struct, masks = self.fuse_distinct_responses((conf_t, r_cont, r_adj, r_sem), available)
+            evidence.update(confidence_available=masks[0], continuity_available=masks[1],
+                adjacency_available=masks[2], semantic_available=masks[3],
+                evidence_count=torch.stack(masks).sum(0))
+            conf_t, r_cont, r_adj, r_sem = [torch.nan_to_num(value, nan=0., posinf=0., neginf=0.).clamp(0, 1)
+                                         for value in (conf_t, r_cont, r_adj, r_sem)]
+        elif self.fusion_mode == 'doris_confidence_guided':
             r_struct = self.fuse_doris_responses(
                 conf_t, r_cont, r_adj, r_sem, pseudo_label)
             # Keep exported inputs finite too; unavailable priors were excluded
@@ -313,11 +436,13 @@ class StructPriorConsistencyGate(nn.Module):
         if not self.use_target_gate:
             if not collect_debug and not log_stats:
                 return pseudo_weight, dict(
+                    **evidence,
                     R_struct=r_struct.detach(), R_continuity=r_cont.detach(),
                     R_adj=r_adj.detach(), R_sem=r_sem.detach(),
                     final_pseudo_weight=pseudo_weight.detach())
             target_adj = self._adjacency_matrix_from_label(pseudo_label).detach()
             debug_dict = dict(
+                **evidence,
                 R_struct=r_struct.detach(),
                 R_continuity=r_cont.detach(),
                 R_adj=r_adj.detach(),
@@ -355,17 +480,13 @@ class StructPriorConsistencyGate(nn.Module):
                                       struct_gate)
         gate[struct_mask] = struct_gate[struct_mask]
 
-        if iter < self.struct_warmup_iters:
-            final_gate = torch.ones_like(gate)
-        else:
-            ramp_den = max(float(self.struct_rampup_iters), 1.0)
-            ramp = min(1.0, max(0.0, (iter - self.struct_warmup_iters) /
-                                ramp_den))
-            final_gate = (1 - ramp) * torch.ones_like(gate) + ramp * gate
+        ramp = self.gate_strength(iter)
+        final_gate = (1-ramp)*torch.ones_like(gate)+ramp*gate
         new_pseudo_weight = pseudo_weight * final_gate
 
         if not collect_debug and not log_stats:
             return new_pseudo_weight, dict(
+                **evidence,
                 R_struct=r_struct.detach(), R_continuity=r_cont.detach(),
                 R_adj=r_adj.detach(), R_sem=r_sem.detach(),
                 final_pseudo_weight=new_pseudo_weight.detach())
@@ -375,6 +496,7 @@ class StructPriorConsistencyGate(nn.Module):
         struct_values = final_gate[struct_mask]
         filtered = unreliable & struct_mask
         debug_dict = dict(
+            **evidence,
             R_struct=r_struct.detach(),
             R_continuity=r_cont.detach(),
             R_adj=r_adj.detach(),

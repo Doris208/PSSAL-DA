@@ -63,6 +63,8 @@ class PlanTests(unittest.TestCase):
                 if path.stem.endswith('_proto_struct_edge'):
                     expected = [3000,3500,4500,5000,5500,6500,10500] if update==3000 else \
                                [4500,5000,5500,6500,8500,10500]
+                    if direction == 'goji26RGB2goji30RGB':
+                        expected.remove(10500)
                     self.assertEqual(plan['extra'],expected)
                 if path.stem.endswith('_3vi'):
                     self.assertEqual(plan['extra'],[])

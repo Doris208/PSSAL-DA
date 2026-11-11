@@ -37,7 +37,8 @@ def check_config(cfg, expected, doris_full=False):
     losses = losses if isinstance(losses, list) else [losses]
     boundary_losses = [x for x in losses if x.get('type') == 'StructEdgeLoss']
     if doris_full:
-        assert struct_mode == 'doris_confidence_guided'
+        structural_v2 = cfg.get('name', '').startswith('doris_goji26RGB2goji30RGB_')
+        assert struct_mode == ('struct_distinct_v1' if structural_v2 else 'doris_confidence_guided')
         assert edge_mode == 'doris_reliable'
         assert len(boundary_losses) == 1
         assert boundary_losses[0]['boundary_loss_mode'] == 'doris_balanced'

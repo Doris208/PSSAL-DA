@@ -1,4 +1,4 @@
-# DORIS stage 1: Structural ablation, aligned with the direction-specific Full.
+# Structural-only V2, preserving the direction-specific Full training protocol.
 # Adapted from goji26RGB2goji30RGB_hrda_3vi_struct_gate.py.
 _base_ = ['../../pssalda_26rgb2_30rgb_ablation_common.py']
 
@@ -10,8 +10,15 @@ uda = make_uda_override(False, True, False, False)
 log_config = make_log_config(False, False)
 
 uda['struct_cfg'].update(
-    fusion_mode='doris_confidence_guided',
-    continuity_weight=0.40, adjacency_weight=0.30, semantic_weight=0.30)
+    fusion_mode='struct_distinct_v1',
+    adjacency_mode='cross_class_conditional_v1',
+    semantic_score_mode='probability_margin_v1',
+    confidence_weight=0.15, continuity_weight=0.30,
+    adjacency_weight=0.30, semantic_weight=0.25,
+    adj_cross_uniform_smoothing=0.10, adj_min_cross_mass=0.01,
+    semantic_temperature=0.15,
+    struct_gate_schedule='early_nonzero_linear',
+    struct_gate_initial_strength=0.10, struct_gate_full_iter=4000)
 
 # Match Full's basic logging; module-specific losses are retained.
 uda.update(doris_process_logging=False, doris_log_interval=1000)
@@ -29,7 +36,7 @@ uda.update(
     fixed_probe_interval=500, fixed_probe_max_samples=1, fixed_probe_index=0,
     mechanism_save_raw=True, mechanism_make_figures=True)
 
-work_dir = '/root/shared-nvme/work_dirs/doris_stage1/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_struct_gate'
+work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_struct_gate'
 name = 'doris_goji26RGB2goji30RGB_hrda_3vi_struct_gate'
 exp = 'doris_stage1_ablation'
 name_uda = 'doris_structural'

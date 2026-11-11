@@ -45,7 +45,7 @@ uda.update(
     ],
     mechanism_save_raw=True, mechanism_make_figures=True)
 
-work_dir = '/root/shared-nvme/work_dirs/doris_hphy_early4k/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_phy_gate_hphy_early4k'
+work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_phy_gate'
 name = 'doris_goji26RGB2goji30RGB_hrda_3vi_phy_gate_hphy_early4k'
 exp = 'doris_stage1_ablation'
 name_uda = 'doris_physiology'

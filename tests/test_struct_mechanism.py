@@ -62,7 +62,7 @@ def fixture_arrays(ramp=1., mode='soft', positive_weight=.8, gt=False):
             semantic_weight=.3, struct_min_weight=.65, struct_filter_threshold=.32, struct_filter_mode=mode,
             struct_positive_classes=[2, 3, 4], ramp=ramp, use_target_gate=True, eps=1e-6,
             struct_warmup_iters=6000, struct_rampup_iters=4000,
-            rule_iter=12000, state='active'),
+            rule_iter=int(6000+4000*ramp), state='active'),
         vi_normalization=dict(ndvi=dict(min=-1., max=1.), ndre=dict(min=-1., max=1.), cire=dict(min=0., max=5.)))
     return arrays, meta
 
@@ -259,10 +259,42 @@ class StructuralForwardTests(unittest.TestCase):
 
 
 class StructuralLauncherTests(unittest.TestCase):
+    def test_rgb_tableiv_structural_v2_alignment_and_output_roots(self):
+        from test_minimal_output import static_config
+        from tools.check_doris_stage1_configs import VARIANTS
+        from tools.check_doris_stage1_ablation_configs import STRUCT_V2_OVERRIDES
+        from tools.struct_schedule import struct_gate_strength
+
+        folder = 'configs/hrda/doris/goji26RGB2goji30RGB/'
+        stem = 'doris_goji26RGB2goji30RGB_hrda_3vi'
+        configs = {suffix: static_config(folder+stem+suffix+'.py') for suffix, _ in VARIANTS}
+        reference = configs['_struct_gate']['uda']['struct_cfg']
+        for suffix in ('_struct_gate', '_phy_struct_gate', '_proto_struct_edge'):
+            cfg = configs[suffix]
+            self.assertEqual(cfg['uda']['struct_cfg'], reference)
+            self.assertEqual(cfg['model']['decode_head']['struct_prior_interaction']['gamma_struct'], .05)
+            for key, value in STRUCT_V2_OVERRIDES.items():
+                self.assertEqual(reference[key], value)
+            for step, expected in zip((0, 1000, 2000, 3000, 4000, 6000, 12000), (.1, .325, .55, .775, 1., 1., 1.)):
+                self.assertAlmostEqual(struct_gate_strength(step, reference['struct_gate_schedule'],
+                    initial_strength=reference['struct_gate_initial_strength'], full_iter=reference['struct_gate_full_iter']), expected)
+        for suffix, flags in VARIANTS:
+            cfg = configs[suffix]
+            self.assertEqual(tuple(cfg['uda'][module+'_cfg']['enable'] for module in ('phy', 'struct', 'proto', 'struct_edge')), flags)
+            self.assertEqual(cfg['work_dir'], '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/'
+                'goji26RGB2goji30RGB/'+stem[6:]+suffix)
+            for key in ('data', 'optimizer', 'lr_config', 'runner', 'evaluation', 'checkpoint_config'):
+                self.assertEqual(cfg[key], configs[''][key])
+        for module, suffix in (('phy', '_phy_gate'), ('proto', '_ps_proto'), ('struct_edge', '_struct_edge')):
+            self.assertEqual(configs['_proto_struct_edge']['uda'][module+'_cfg'], configs[suffix]['uda'][module+'_cfg'])
+        self.assertEqual(configs['_phy_struct_gate']['uda']['phy_cfg'], configs['_phy_gate']['uda']['phy_cfg'])
+
     def test_resolved_configs_pass_shared_protocol_and_match_training_data(self):
         from test_minimal_output import static_config
 
         class Config(dict):
+            __setattr__ = dict.__setitem__
+
             def __getattr__(self, name):
                 try:
                     return self[name]
@@ -286,11 +318,36 @@ class StructuralLauncherTests(unittest.TestCase):
         name = 'doris_goji26RGB2goji30RGB_hrda_3vi'
         structural = attributes(static_config(folder+name+'_struct_gate.py'))
         baseline = attributes(static_config(folder+name+'.py'))
+        from tools.check_doris_stage1_ablation_configs import audit
+        self.assertEqual(len(audit(lambda path: attributes(static_config(Path(path).relative_to(ROOT).as_posix())))), 24)
         scope['verify_protocol'](structural, False, structural=True)
         scope['verify_protocol'](baseline, False)
         self.assertEqual(scope['data_protocol'](structural), scope['data_protocol'](baseline))
         for key in ('seed', 'optimizer', 'lr_config', 'fp16', 'target_img_norm_cfg'):
             self.assertEqual(structural.get(key), baseline.get(key))
+        self.assertEqual(structural.model.decode_head.struct_prior_interaction.gamma_struct, .05)
+        self.assertEqual(structural.runner.max_iters, 15000)
+        self.assertEqual(structural.uda.struct_cfg.struct_min_weight, .65)
+        self.assertEqual(structural.uda.struct_cfg.struct_filter_threshold, .32)
+        self.assertEqual(structural.uda.struct_cfg.struct_filter_mode, 'soft')
+        # Execute the real CLI work-dir selection statements without importing MMCV.
+        source = ROOT/'tools/train.py'
+        tree = ast.parse(source.read_text(encoding='utf-8'))
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        selection = next(node for node in main.body if isinstance(node, ast.If) and
+                         ast.unparse(node.test) == 'args.work_dir is not None')
+        assignment = next(node for node in main.body if isinstance(node, ast.Assign) and
+                          ast.unparse(node.targets[0]) == 'cfg.model.train_cfg.work_dir')
+        from types import SimpleNamespace
+        tree.body = [selection, assignment]
+        namespace = dict(cfg=structural, args=SimpleNamespace(work_dir='/tmp/struct-v2-cli'))
+        exec(compile(tree, str(source), 'exec'), namespace)
+        self.assertEqual(structural.work_dir, '/tmp/struct-v2-cli')
+        self.assertEqual(structural.model.train_cfg.work_dir, '/tmp/struct-v2-cli')
+        from tools.doris_checkpoint_plan import checkpoint_plan
+        events = checkpoint_plan(structural)['events']
+        self.assertTrue(events)
+        self.assertTrue(all(event['local_iter'] == 4000 for event in events))
         with self.assertRaises(ValueError):
             scope['verify_protocol'](structural, True)
 
@@ -298,7 +355,7 @@ class StructuralLauncherTests(unittest.TestCase):
         tree = ast.parse((ROOT / 'tools/replay_struct_mechanism.py').read_text(encoding='utf-8'))
         defaults = {n.targets[0].id: n.value for n in tree.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)}
         path = ast.literal_eval(defaults['STRUCT_WORK_DIR'].args[0])
-        self.assertEqual(path, '/root/shared-nvme/work_dirs/doris_hphy_early4k/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_struct_gate')
+        self.assertEqual(path, '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_struct_gate')
         for key in ('CHECKPOINT_STRUCT', 'CHECKPOINT_BASELINE'):
             self.assertEqual(ast.literal_eval(defaults[key].args[0]), 'iter_12000.pth')
         phy = (ROOT / 'scripts/run_hphy_mechanism_26rgb2_30rgb.sh').read_text()

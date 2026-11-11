@@ -31,7 +31,13 @@ def load_function(path, name, namespace):
 
 @unittest.skipIf(torch is None, 'Torch CPU runtime is required')
 class StructuralProbeCPU(unittest.TestCase):
-    def test_production_online_capture_offline_forward_schedule_and_readonly_state(self):
+    def test_v1_online_offline_parity(self):
+        self.check_production_parity(False)
+
+    def test_v2_online_offline_parity(self):
+        self.check_production_parity(True)
+
+    def check_production_parity(self, v2):
         from tools.doris_struct_evidence import prepare_struct_evidence
         gate_class = runpy.run_path(str(ROOT/'mmseg/models/uda/struct_prior_gate.py'))['StructPriorConsistencyGate']
         spec = importlib.util.spec_from_file_location('struct_probe_cpu', ROOT/'mmseg/utils/mechanism.py')
@@ -63,10 +69,16 @@ class StructuralProbeCPU(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.model, self.ema_model = Student(), Student()
-                self.struct_gate = gate_class(5, fusion_mode='doris_confidence_guided', struct_min_weight=.65,
-                    struct_filter_threshold=.32)
+                options = dict(fusion_mode='doris_confidence_guided', struct_min_weight=.65, struct_filter_threshold=.32)
+                if v2:
+                    options.update(fusion_mode='struct_distinct_v1', adjacency_mode='cross_class_conditional_v1',
+                        semantic_score_mode='probability_margin_v1', confidence_weight=.15, continuity_weight=.30,
+                        adjacency_weight=.30, semantic_weight=.25, struct_gate_schedule='early_nonzero_linear')
+                self.struct_gate = gate_class(5, **options)
                 self.struct_cfg = {key: getattr(self.struct_gate, key) for key in (
-                    'fusion_mode', 'continuity_weight', 'adjacency_weight', 'semantic_weight',
+                    'fusion_mode', 'confidence_weight', 'continuity_weight', 'adjacency_weight', 'semantic_weight',
+                    'adjacency_mode', 'semantic_score_mode', 'adj_cross_uniform_smoothing', 'adj_min_cross_mass',
+                    'semantic_temperature', 'struct_gate_schedule', 'struct_gate_initial_strength', 'struct_gate_full_iter',
                     'struct_min_weight', 'struct_filter_threshold', 'struct_filter_mode',
                     'struct_warmup_iters', 'struct_rampup_iters', 'struct_positive_classes',
                     'use_source_adjacency_ema', 'use_semantic_proto', 'use_target_gate', 'eps')}
@@ -124,7 +136,10 @@ class StructuralProbeCPU(unittest.TestCase):
                 self.assertEqual(description['student_inference']['test_cfg']['mode'], 'whole')
                 self.assertEqual(description['panel_sources']['struct_prediction'],
                     'Student test-mode inference from the selected model state')
-                if step == 2000:
+                if v2:
+                    for key in ('C_conf', 'adjacency_available', 'semantic_available', 'evidence_count', 'target_cross_neighbor_count'):
+                        np.testing.assert_array_equal(online[key], offline[key])
+                if step == 2000 and not v2:
                     np.testing.assert_array_equal(offline['A_struct'], 0)
 
 

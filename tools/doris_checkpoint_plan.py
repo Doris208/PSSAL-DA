@@ -45,12 +45,16 @@ def checkpoint_plan(config):
                 event('phy', 'ramp_end', start + ramp)
     if struct.get('enable'):
         start, ramp = struct.get('struct_warmup_iters', 6000), struct.get('struct_rampup_iters', 4000)
+        early = struct.get('struct_gate_schedule', 'legacy_warmup_linear') == 'early_nonzero_linear'
+        if early:
+            start, ramp = 0, struct.get('struct_gate_full_iter', 4000)
         if struct.get('use_target_gate', True):
             event('struct', 'gate_start', start)
             event('struct', 'ramp_end', start + max(ramp, 1))
         if struct.get('use_feature_interaction', False):
-            start = struct.get('feature_interaction_warmup_iters', start)
-            ramp = struct.get('feature_interaction_rampup_iters', ramp)
+            if not early:
+                start = struct.get('feature_interaction_warmup_iters', start)
+                ramp = struct.get('feature_interaction_rampup_iters', ramp)
             event('struct_feature', 'interaction_start', start)
             event('struct_feature', 'ramp_end', start + max(ramp, 1))
     if proto.get('enable'):

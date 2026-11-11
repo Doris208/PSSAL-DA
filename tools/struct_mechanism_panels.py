@@ -13,7 +13,7 @@ from matplotlib.ticker import FormatStrFormatter
 import numpy as np
 
 from tools.build_hphy_mechanism_figure import PALETTE, crop_arrays, file_sha256, roi_coordinates, save_figure
-from tools.doris_struct_evidence import CONTRIBUTIONS, RESPONSES, prepare_struct_evidence, struct_statistics
+from tools.doris_struct_evidence import CONTRIBUTIONS, RESPONSES, contribution_keys, prepare_struct_evidence, struct_statistics
 
 VERSION = 4
 BACKGROUND = np.array([236, 236, 236], dtype=np.uint8)
@@ -27,10 +27,11 @@ FORMAL_PANELS = dict(image_rgb='target_rgb_formal', R_conf='r_conf_struct_only_f
 SYMBOLS = dict(R_conf=r'$R_{\mathrm{conf}}$', R_loc=r'$R_{\mathrm{loc}}$',
     R_adj=r'$R_{\mathrm{adj}}$', R_prob=r'$R_{\mathrm{prob}}$', R_struct=r'$R_{\mathrm{struct}}$',
     A_struct=r'$A_{\mathrm{struct}}$', C_loc=r'$C_{\mathrm{loc}}$',
+    C_conf=r'$C_{\mathrm{conf}}$',
     C_adj=r'$C_{\mathrm{adj}}$', C_prob=r'$C_{\mathrm{prob}}$')
 TITLES = dict(image_rgb='Target RGB', R_conf='Confidence', R_loc='Local', R_adj='Adjacency',
     R_prob='Semantic', R_struct='Structural response', A_struct='Attenuation',
-    C_loc='Local', C_adj='Adjacency', C_prob='Semantic',
+    C_conf='Confidence', C_loc='Local', C_adj='Adjacency', C_prob='Semantic',
     baseline_prediction='Baseline', struct_prediction='Structural Student prediction')
 MODES = dict(struct_formal_group_1x7=('formal', COMPONENTS),
     struct_full_raw=('full', COMPONENTS), struct_only_raw=('struct', COMPONENTS),
@@ -49,7 +50,7 @@ def mask_for(arrays, key, mode):
 
 
 def display_scales(arrays, meta, mode):
-    scales = {key: [0., 1.] for key in RESPONSES+CONTRIBUTIONS}
+    scales = {key: [0., 1.] for key in RESPONSES+('C_conf',)+CONTRIBUTIONS}
     if mode == 'contrast':
         for key in RESPONSES:
             values = arrays[key][mask_for(arrays, key, mode)]
@@ -220,19 +221,21 @@ def render_struct_bundle(saved, output_dir, metadata=None, config=None, dpi=600,
     (out/'struct_stats.json').write_text(json.dumps(stats, indent=2), encoding='utf-8')
     write_csv(out/'struct_stats.csv', stats['attenuation_by_class'])
     write_csv(out/'struct_response_stats.csv', [dict(metric=key, **value) for key, value in stats['responses'].items()])
+    write_csv(out/'struct_response_by_class.csv', stats['responses_by_class'])
     write_csv(out/'struct_class_distribution.csv', stats['class_distribution'])
     write_csv(out/'struct_correlations.csv', [dict(pair=key, correlation=value) for key, value in stats['correlations'].items()])
+    write_csv(out/'struct_grouped_correlations.csv', stats['grouped_correlations'])
     caption = (
         'R_conf is the EMA Teacher maximum class probability. '
         'R_loc measures eight-neighbor class continuity. '
         'R_adj measures agreement with the saved source class-adjacency prior. '
-        'R_prob is cosine similarity to the saved source probability prototype. '
-        'R_struct is the captured confidence-guided structural response. '
+        'R_prob follows the semantic_score_mode recorded in render_meta.json. '
+        'R_struct follows the captured fusion_mode and production availability masks. '
         'The formal seventh panel is the selected-state Student test-mode argmax prediction. '
         'Formal response panels display captured raw values only on valid Teacher Building, Water and Road pixels, '
         'with a shared viridis scale from 0 to 1. '
         'All five classes use the H-Phy palette, including in structural-class response views. '
-        'C_loc, C_adj and C_prob decompose that response with the recorded availability masks. '
+        'Available additive contribution terms follow the recorded fusion mode. '
         'A_struct = 1 - W_after/W_before measures the subsequent supervision attenuation on '
         'valid Teacher Building, Water and Road pixels with W_before > 0. '
         'The center196 display is the exact [30:226,30:226] slice of the native 256 grid. '
@@ -243,6 +246,10 @@ def render_struct_bundle(saved, output_dir, metadata=None, config=None, dpi=600,
     with plt.rc_context({'font.family': 'sans-serif', 'font.sans-serif': ['Arial', 'DejaVu Sans'],
                          'font.size': font_size, 'pdf.fonttype': 42, 'svg.fonttype': 'none'}):
         for stem, (mode, keys) in MODES.items():
+            if stem == 'struct_contrib':
+                if not contribution_keys(meta):
+                    continue
+                keys = contribution_keys(meta)+('R_struct', 'A_struct')
             scales = display_scales(center, meta, mode)
             scales_record[stem] = {key: scales[key] for key in keys if key in scales}
             fig = panel_figure(center, keys, mode, scales, meta, font_size)
@@ -271,7 +278,7 @@ def render_struct_bundle(saved, output_dir, metadata=None, config=None, dpi=600,
                 scales = display_scales(center, meta, mode)
                 for key in RESPONSES+('A_struct',):
                     export_single(current, key, mode, scales, meta, folder/stem, dpi, font_size)
-            for key in CONTRIBUTIONS:
+            for key in contribution_keys(meta):
                 export_single(current, key, 'struct', display_scales(center, meta, 'struct'), meta, folder/'contributions', dpi, font_size)
             # Direct A_struct files make the paper panel easy to locate.
             export_single(current, 'A_struct', 'struct', display_scales(center, meta, 'struct'), meta, folder, dpi, font_size)
@@ -303,7 +310,7 @@ def render_struct_bundle(saved, output_dir, metadata=None, config=None, dpi=600,
         render=dict(width_inches=7.2, crop=[30, 30, 226, 226], interpolation='nearest',
             scales=scales_record, quantiles=[.02, .98], contrast_reference='center196 structural pixels',
             attenuation_scale='fixed saved-gate bound; original A_struct values preserved',
-            contribution_identity='C_loc+C_adj+C_prob = R_struct; A_struct is a downstream weight effect',
+            contribution_identity='+'.join(contribution_keys(meta))+' = R_struct' if contribution_keys(meta) else 'Legacy product has no additive decomposition',
             invalid_rgb=INVALID.tolist(), nonstructural_rgb=BACKGROUND.tolist()),
         output_files=sorted(p.relative_to(out).as_posix() for p in out.rglob('*') if p.is_file()))
     (out/'logs').mkdir()

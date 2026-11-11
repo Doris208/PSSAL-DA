@@ -79,22 +79,18 @@ def validate_arrays(arrays, meta, tolerance=1e-5):
     for key, expected in masks.items():
         if not np.array_equal(arrays[key], expected):
             raise ValueError('Incorrect structural mask: ' + key)
-    if gate['fusion_mode'] != 'doris_confidence_guided':
-        raise ValueError('Expected confidence-guided structural fusion')
-    numerator, denominator = np.zeros((256, 256)), np.zeros((256, 256))
-    for coefficient, key, available in (
-            (gate['continuity_weight'], 'R_loc', np.ones((256, 256), bool)),
-            (gate['adjacency_weight'], 'R_adj', arrays['adjacency_available']),
-            (gate['semantic_weight'], 'R_prob', arrays['semantic_available'])):
-        numerator += coefficient * arrays[key] * available
-        denominator += coefficient * available
-    expected_response = arrays['R_conf'] * numerator / np.maximum(denominator, gate['eps'])
-    probability_dtype = meta.get('checkpoint_struct', {}).get('struct_probability_dtype', 'float32')
-    if probability_dtype not in ('float16', 'float32'):
-        raise ValueError('Unsupported structural probability computation dtype')
-    response_tolerance = max(tolerance, float(np.finfo(probability_dtype).eps))
-    if not np.allclose(arrays['R_struct'], expected_response, atol=response_tolerance, rtol=0):
+    from tools.doris_struct_evidence import prepare_struct_evidence
+    # Replay files record their probability dtype. Preserve the historical
+    # float32 default of this strict replay validator for older replay files.
+    validation_meta = dict(meta)
+    validation_meta.setdefault('struct_probability_dtype',
+        meta.get('checkpoint_struct', {}).get('struct_probability_dtype', 'float32'))
+    _, checked = prepare_struct_evidence(arrays, validation_meta)
+    if checked['struct_validation']['fusion_max_abs_error'] is None or (
+            checked['struct_validation']['fusion_max_abs_error'] > checked['struct_validation']['fusion_tolerance']):
         raise ValueError('Structural fusion identity failed')
+    if not checked['struct_validation']['passed']:
+        raise ValueError('Structural fusion/gate/weight identity failed: '+', '.join(checked['struct_validation']['errors']))
     raw_gate = np.maximum(arrays['R_struct'], gate['struct_min_weight'])
     below = arrays['R_struct'] < gate['struct_filter_threshold']
     raw_gate = np.where(below, 0 if gate['struct_filter_mode'] == 'hard' else raw_gate*.5, raw_gate)

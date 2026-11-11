@@ -30,6 +30,45 @@ def online_payload(arrays, meta):
 
 
 class StructuralVisualizationTests(unittest.TestCase):
+    def test_v2_contributions_and_formal_panel_identity(self):
+        from tools.check_doris_stage1_ablation_configs import STRUCT_V2_OVERRIDES
+        from tools.doris_struct_evidence import contribution_keys
+        arrays, meta = fixture_arrays()
+        meta['gate'].update(STRUCT_V2_OVERRIDES)
+        with self.assertRaisesRegex(ValueError, 'production availability'):
+            prepare_struct_evidence(arrays, meta)
+        valid_label = arrays['teacher_pseudo_label'] < 5
+        arrays.update(confidence_available=valid_label, continuity_available=valid_label,
+            source_cross_prior_available=arrays['adjacency_available'].copy(),
+            target_cross_neighbor_count=arrays['adjacency_available'].astype(np.int32))
+        arrays['evidence_count'] = (2*valid_label.astype(np.int32) +
+            arrays['adjacency_available'].astype(np.int32)+arrays['semantic_available'].astype(np.int32))
+        arrays['R_struct'] = (.15*arrays['R_conf']+.30*arrays['R_loc']+
+            .30*arrays['R_adj']*arrays['adjacency_available']+.25*arrays['R_prob']*arrays['semantic_available'])/(
+            .45+.30*arrays['adjacency_available']+.25*arrays['semantic_available']+1e-6)
+        raw = np.maximum(arrays['R_struct'], .65)
+        raw = np.where(arrays['R_struct'] < .32, raw*.5, raw)
+        arrays['W_after'] = arrays['W_before']*np.where(valid_label & (arrays['teacher_pseudo_label'] >= 2), raw, 1)
+        prepared, info = prepare_struct_evidence(arrays, meta)
+        self.assertTrue(info['struct_validation']['passed'], info['struct_validation'])
+        keys = contribution_keys(info)
+        self.assertEqual(keys, ('C_conf', 'C_loc', 'C_adj', 'C_prob'))
+        np.testing.assert_allclose(sum(prepared[key] for key in keys), prepared['R_struct'], atol=1e-6)
+        stats = struct_statistics(prepared, info)
+        self.assertIn('C_conf', stats['responses'])
+        self.assertIn('complete_evidence_ratio', stats['availability'])
+        self.assertEqual(len(stats['grouped_correlations']), 20)
+        center = panels.crop_arrays(prepared)
+        scales = panels.display_scales(center, info, 'formal')
+        fig = panels.panel_figure(center, panels.COMPONENTS, 'formal', scales, info)
+        try:
+            axes = [axis for axis in fig.axes if axis.images]
+            self.assertEqual(len(axes), 7)
+            np.testing.assert_array_equal(axes[-1].images[0].get_array(),
+                panels.pixels_for(center, 'struct_prediction', 'full', scales))
+        finally:
+            panels.plt.close(fig)
+
     def test_six_cases_weights_masks_contributions_and_schedule(self):
         for index, (ramp, mode, weight) in enumerate(((0., 'soft', .8), (.125, 'soft', .8),
                 (.5, 'soft', .8), (1., 'soft', .8), (1., 'hard', .8), (1., 'soft', 0.))):

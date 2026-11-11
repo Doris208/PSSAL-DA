@@ -10,7 +10,7 @@ log_config = make_log_config(False, False)
 log_config['hooks'][0].update(log_memory=True, paper_names=False)
 uda.update(mechanism_logging=False, fixed_probe_enabled=False)
 
-work_dir = '/root/shared-nvme/work_dirs/doris_stage1/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi'
+work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi'
 name = 'doris_goji26RGB2goji30RGB_hrda_3vi'
 exp = 'doris_stage1_hrda_baseline'
 name_uda = 'dacs_3vi_baseline'

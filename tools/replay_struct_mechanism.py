@@ -24,12 +24,12 @@ LOGGER = logging.getLogger('struct_offline')
 # Edit these defaults for the RGB26 -> RGB30 experiment.
 CONFIG_STRUCT = ROOT / 'configs/hrda/doris/goji26RGB2goji30RGB/doris_goji26RGB2goji30RGB_hrda_3vi_struct_gate.py'
 CONFIG_BASELINE = shared.CONFIG_BASELINE
-STRUCT_WORK_DIR = Path('/root/shared-nvme/work_dirs/doris_hphy_early4k/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_struct_gate')
+STRUCT_WORK_DIR = Path('/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi_struct_gate')
 BASELINE_WORK_DIR = shared.BASELINE_WORK_DIR
 CHECKPOINT_STRUCT = Path('iter_12000.pth')
 CHECKPOINT_BASELINE = Path('iter_12000.pth')
 TARGET_FILES = shared.TARGET_FILES
-OUTPUT_ROOT = Path('/root/shared-nvme/work_dirs/doris_hphy_early4k/goji26RGB2goji30RGB/struct_mechanism_26rgb2_30rgb')
+OUTPUT_ROOT = Path('/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26RGB2goji30RGB/struct_mechanism_26rgb2_30rgb')
 
 
 def infer_model(model, sample, probe):
@@ -61,7 +61,6 @@ def infer_model(model, sample, probe):
                 target_probs=probabilities, pseudo_label=label, pseudo_weight=weight,
                 target_confidence=confidence, iter=model.local_iter,
                 collect_debug=True, log_stats=False, update_priors=False)
-            safe = label.clamp(0, model.num_classes - 1)
             top_two = probabilities.topk(2, dim=1).values
             tensors = dict(teacher_pseudo_label=label, teacher_confidence=confidence,
                 teacher_top2_margin=top_two[:, 0]-top_two[:, 1],
@@ -69,10 +68,12 @@ def infer_model(model, sample, probe):
                 R_prob=responses['R_sem'], R_struct=responses['R_struct'],
                 G_struct=responses['struct_gate'],
                 W_before=weight, W_after=after, delta_W=after-weight, valid_mask=valid,
-                adjacency_available=model.struct_gate.source_adj_initialized[safe] &
-                    model.struct_gate.use_source_adjacency_ema,
-                semantic_available=model.struct_gate.semantic_proto_initialized[safe] &
-                    model.struct_gate.use_semantic_proto)
+                adjacency_available=responses['adjacency_available'],
+                semantic_available=responses['semantic_available'])
+            for key in ('confidence_available', 'continuity_available', 'evidence_count',
+                        'target_cross_neighbor_count', 'source_cross_prior_available'):
+                if key in responses:
+                    tensors[key] = responses[key]
             arrays = {key: value[0].detach().float().cpu().numpy().copy()
                       for key, value in tensors.items()}
         prediction = model.get_model()(img=[image], img_metas=[metas], return_loss=False, rescale=True)
@@ -81,7 +82,10 @@ def infer_model(model, sample, probe):
         arrays['struct_prediction'] = np.asarray(prediction[0], dtype=np.uint8).copy()
     if shared.state_digest(model.state_dict()) != before or any(p.grad is not None for p in model.parameters()):
         raise RuntimeError('Read-only replay changed model state or created gradients')
-    for key in ('valid_mask', 'adjacency_available', 'semantic_available'):
+    for key in ('valid_mask', 'adjacency_available', 'semantic_available', 'confidence_available',
+                'continuity_available', 'source_cross_prior_available'):
+        if key not in arrays:
+            continue
         arrays[key] = arrays[key].astype(bool)
     arrays['teacher_pseudo_label'] = arrays['teacher_pseudo_label'].astype(np.uint8)
     arrays['teacher_struct_mask'] = arrays['valid_mask'] & np.isin(
@@ -170,13 +174,16 @@ def replay(config_struct, checkpoint_struct, config_baseline, checkpoint_baselin
                     arrays['vi_' + name] = vi[0, index].numpy().copy()
                 gate_model = model.struct_gate
                 gate = {key: getattr(gate_model, key) for key in (
-                    'fusion_mode', 'continuity_weight', 'adjacency_weight', 'semantic_weight',
+                    'fusion_mode', 'confidence_weight', 'continuity_weight', 'adjacency_weight', 'semantic_weight',
+                    'adjacency_mode', 'semantic_score_mode', 'adj_cross_uniform_smoothing',
+                    'adj_min_cross_mass', 'semantic_temperature', 'struct_gate_schedule',
+                    'struct_gate_initial_strength', 'struct_gate_full_iter',
+                    'confidence_power', 'continuity_power', 'adjacency_power', 'semantic_power',
                     'struct_min_weight', 'struct_filter_threshold', 'struct_filter_mode',
                     'struct_warmup_iters', 'struct_rampup_iters', 'struct_positive_classes',
                     'use_source_adjacency_ema', 'use_semantic_proto', 'use_target_gate', 'eps')}
                 gate.update(rule_iter=model.local_iter, state=module_states(model)['struct'],
-                    ramp=min(1., max(0., (model.local_iter-gate_model.struct_warmup_iters) /
-                                       max(float(gate_model.struct_rampup_iters), 1.))),
+                    ramp=gate_model.gate_strength(model.local_iter),
                     implementation='StructPriorConsistencyGate.apply(update_priors=False)')
                 priors = {key: getattr(gate_model, key).detach().cpu().numpy().copy() for key in (
                     'source_adj_ema', 'semantic_proto_ema', 'source_adj_initialized', 'semantic_proto_initialized')}
@@ -204,7 +211,7 @@ def replay(config_struct, checkpoint_struct, config_baseline, checkpoint_baselin
             name = Path(info['path']).name
             info['selection_rule'] = selection or ('best Goji IoU' if name.startswith('best_goji') else
                 'best mIoU' if name.startswith('best_mIoU') else 'explicit checkpoint chosen by author')
-        source_files = ['tools/replay_struct_mechanism.py', 'tools/build_struct_mechanism_figure.py',
+        source_files = ['tools/replay_struct_mechanism.py', 'tools/struct_schedule.py', 'tools/build_struct_mechanism_figure.py',
             'tools/doris_struct_evidence.py', 'tools/struct_mechanism_panels.py',
             'tools/replay_hphy_mechanism.py', 'tools/replay_doris_mechanisms.py',
             'tools/build_hphy_mechanism_figure.py', 'tools/build_doris_mechanism_figures.py',
@@ -238,7 +245,7 @@ def replay(config_struct, checkpoint_struct, config_baseline, checkpoint_baselin
             roi=dict(coordinate_system='original 256 grid, exclusive x2/y2', requested=roi,
                      translated_center196=roi_coordinates(roi)), gate=gate, pseudo_threshold=threshold,
             response_implementation='Production Teacher forward and StructPriorConsistencyGate.apply',
-            response_formula='R_conf * sum(alpha_i * available_i * R_i) / sum(alpha_i * available_i)',
+            response_formula='Recorded fusion_mode with production availability masks',
             weight_definition='DACS confidence fraction recomputed over this B=1 full-grid replay',
             replay_scope='Saved source EMA priors and target gate; training-only source-target feature interaction requires a paired training batch',
             mask_definitions=dict(teacher_struct_mask='valid Teacher predictions in configured structural classes',

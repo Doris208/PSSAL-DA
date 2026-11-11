@@ -1599,8 +1599,7 @@ class DACS(UDADecorator):
             for name, bank in (('adj', self.struct_gate.source_adj_initialized),
                                 ('prob', self.struct_gate.semantic_proto_initialized)):
                 log_vars['doris.mparc.' + name + '_ready_classes'] = bank.float().sum().item()
-            ratio = max(0.0, min(1.0, (self.local_iter - self.struct_gate.struct_warmup_iters) /
-                                  max(float(self.struct_gate.struct_rampup_iters), 1.0)))
+            ratio = self.struct_gate.gate_strength(self.local_iter)
             log_vars['doris.schedule.struct_ramp'] = ratio
             log_vars['doris.schedule.struct_feature_strength'] = 0.05 * ratio
         if self.enable_struct_edge:
@@ -2161,11 +2160,8 @@ class DACS(UDADecorator):
             feat_rampup = self.struct_cfg.get(
                 'feature_interaction_rampup_iters',
                 self.struct_cfg.get('struct_rampup_iters', 1))
-            if self.local_iter >= feat_warmup:
-                feat_ratio = min(
-                    1.0,
-                    max(0.0, (self.local_iter - feat_warmup) /
-                        max(float(feat_rampup), 1.0)))
+            if self.local_iter >= feat_warmup or self.struct_gate.struct_gate_schedule == 'early_nonzero_linear':
+                feat_ratio = self.struct_gate.feature_strength(self.local_iter, feat_warmup, feat_rampup)
                 struct_prior_response = \
                     struct_debug['R_struct'].unsqueeze(1) * feat_ratio
                 if self.log_debug_stats:

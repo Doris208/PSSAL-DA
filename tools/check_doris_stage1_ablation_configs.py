@@ -18,6 +18,15 @@ MODULES = ('phy', 'struct', 'proto', 'struct_edge')
 PROTOCOL = ('data', 'optimizer', 'optimizer_config', 'lr_config', 'runner',
             'checkpoint_config', 'evaluation', 'seed', 'fp16', 'crop_size',
             'source_img_norm_cfg', 'target_img_norm_cfg')
+STRUCT_V2_DIRECTION = 'goji26RGB2goji30RGB'
+STRUCT_V2_OVERRIDES = dict(
+    fusion_mode='struct_distinct_v1', adjacency_mode='cross_class_conditional_v1',
+    semantic_score_mode='probability_margin_v1', confidence_weight=.15,
+    continuity_weight=.30, adjacency_weight=.30, semantic_weight=.25,
+    adj_cross_uniform_smoothing=.10, adj_min_cross_mass=.01, semantic_temperature=.15,
+    struct_gate_schedule='early_nonzero_linear', struct_gate_initial_strength=.10,
+    struct_gate_full_iter=4000)
+STRUCT_V2_WORK_ROOT = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/'
 
 
 def audit(reader):
@@ -47,7 +56,10 @@ def audit(reader):
             assert cfg.model == expected_model, (name, 'model differs beyond module switches')
             for module, enabled in zip(MODULES, flags):
                 if enabled:
-                    assert cfg.uda[module + '_cfg'] == full.uda[module + '_cfg'], (name, module)
+                    expected = deepcopy(full.uda[module + '_cfg'])
+                    if direction == STRUCT_V2_DIRECTION and module == 'struct':
+                        expected.update(STRUCT_V2_OVERRIDES)
+                    assert cfg.uda[module + '_cfg'] == expected, (name, module)
             # Non-module training options must match too. Observation/channel
             # metadata are allowed to differ for the already-existing Baseline.
             ignored = {module + '_cfg' for module in MODULES}
@@ -85,14 +97,17 @@ def audit(reader):
                 assert (phy.phy_gate_schedule, phy.phy_gate_initial_strength,
                         phy.phy_gate_full_iter) == ('early_nonzero_linear', .10, 4000)
             if flags[1]:
-                assert cfg.uda.struct_cfg.fusion_mode == 'doris_confidence_guided'
+                assert cfg.uda.struct_cfg.fusion_mode == (
+                    'struct_distinct_v1' if direction == STRUCT_V2_DIRECTION else 'doris_confidence_guided')
             if flags[2]:
                 assert cfg.uda.proto_cfg.tau_proto == 0.25
                 assert cfg.uda.proto_cfg.tau_conf_proto == 0.88
             if flags[3]:
                 assert cfg.uda.struct_edge_cfg.edge_fusion_mode == 'doris_reliable'
                 assert cfg.uda.struct_edge_cfg.pair_response_mode == 'valid_boundary_only'
-            if flags[0]:
+            if direction == STRUCT_V2_DIRECTION:
+                assert cfg.work_dir == STRUCT_V2_WORK_ROOT + direction + '/' + name[6:], name
+            elif flags[0]:
                 assert cfg.work_dir == ('/root/shared-nvme/work_dirs/doris_hphy_early4k/' +
                                        direction + '/' + name[6:] + '_hphy_early4k'), name
             else:
@@ -101,6 +116,7 @@ def audit(reader):
             outputs.add(cfg.work_dir)
             experiment = name[6:]
             commands.append(['python', 'tools/train.py', relative, '--work-dir',
+                             STRUCT_V2_WORK_ROOT + direction + '/' + experiment if direction == STRUCT_V2_DIRECTION else
                              '/root/shared-nvme/work_dirs/doris_stage1/' + direction + '/' + experiment])
             rows.append((name, flags))
     # Preserve the archival launcher identity. Fresh 4K experiments use scripts/run_doris_tableiv_*.
@@ -126,7 +142,7 @@ def main():
     for name, flags in rows:
         print('{}: PASS phy/struct/proto/edge={}'.format(name, flags))
     print('PASS: 24 DORIS configurations and 24 commands; active module parameters '
-          'and training protocols match the corresponding Full. No training executed.')
+          'and training protocols checked, including RGB26-to-RGB30 Structural V2 consistency.')
 
 
 if __name__ == '__main__':

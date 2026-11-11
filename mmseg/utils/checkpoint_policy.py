@@ -34,6 +34,14 @@ def prepare_save(runner, path):
         raise OSError('Insufficient free space for checkpoint: need approximately {} bytes, '
                       'available {}; no history was deleted'.format(needed, free))
     runner.meta.setdefault('doris_checkpoint', {})['completed_iter'] = runner.iter + 1
+    model = getattr(runner.model, 'module', runner.model)
+    gate = getattr(model, 'struct_gate', None)
+    if getattr(gate, 'fusion_mode', None) == 'struct_distinct_v1':
+        rule_iter = model.local_iter
+        runner.meta['structural_mechanism'] = dict(config=dict(model.struct_cfg),
+            rule_iter=rule_iter, gate_strength=gate.gate_strength(rule_iter),
+            last_train_rule_iter=max(0, rule_iter-1),
+            last_train_gate_strength=gate.gate_strength(max(0, rule_iter-1)))
 
 
 @HOOKS.register_module()

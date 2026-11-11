@@ -115,6 +115,9 @@ def module_states(model):
         from mmseg.models.uda.phy_reliability import phy_gate_strength
         rho = phy_gate_strength(model.local_iter, **model.phy_gate_params)
         states['phy'] = ('warmup' if rho == 0 else 'ramping' if rho < 1 else 'active')
+    if flags['struct']:
+        rho = model.struct_gate.gate_strength(model.local_iter)
+        states['struct'] = 'warmup' if rho == 0 else 'ramping' if rho < 1 else 'active'
     if flags['proto']:
         gate = model.proto_gate
         ready = int(gate.valid_proto.sum())
@@ -159,11 +162,14 @@ def probe_arrays(model, image, vi, metas, spatial_valid):
                 target_probs=probabilities, pseudo_label=label, pseudo_weight=weight,
                 target_confidence=confidence, iter=model.local_iter,
                 collect_debug=False, log_stats=False, update_priors=False)
-            safe = label.clamp(0, model.num_classes - 1)
             maps.update(r_conf=confidence, r_loc=responses['R_continuity'],
                 r_adj=responses['R_adj'], r_prob=responses['R_sem'], r_struct=responses['R_struct'],
-                adjacency_available=model.struct_gate.source_adj_initialized[safe],
-                semantic_available=model.struct_gate.semantic_proto_initialized[safe])
+                adjacency_available=responses['adjacency_available'],
+                semantic_available=responses['semantic_available'])
+            for key in ('confidence_available', 'continuity_available', 'evidence_count',
+                        'target_cross_neighbor_count', 'source_cross_prior_available'):
+                if key in responses:
+                    maps[key] = responses[key]
             maps['w_after_struct'] = weight
         if flags['phy'] or flags['struct']:
             maps.update(w_t_ps=weight, delta_w_ps=weight - maps['w_base'])
@@ -195,7 +201,8 @@ def probe_arrays(model, image, vi, metas, spatial_valid):
         if flags['proto']:
             result['prototype_feature_shape'] = np.array(feature_shape)
         result['pseudo_label'] = result['pseudo_label'].astype(np.uint8)
-        for key in ('valid_mask', 'm_phy', 'teacher_pseudo_boundary', 'adjacency_available', 'semantic_available'):
+        for key in ('valid_mask', 'm_phy', 'teacher_pseudo_boundary', 'adjacency_available', 'semantic_available',
+                    'confidence_available', 'continuity_available', 'source_cross_prior_available'):
             if key in result:
                 result[key] = result[key].astype(bool)
         return result
@@ -563,6 +570,7 @@ def branch_probe_payload(model, image, vi, metas, valid, metadata, unavailable_w
     if metadata['modules'] == dict(phy=False, struct=True, proto=False, edge=False):
         from tools.doris_struct_evidence import prepare_struct_evidence, struct_statistics
         metadata['struct_cfg'] = dict(model.struct_cfg, eps=model.struct_gate.eps)
+        metadata['struct_gate_strength'] = model.struct_gate.gate_strength(model.local_iter)
         metadata['struct_probability_dtype'] = 'float16' if image.is_cuda else 'float32'
         with readonly_probe(model):
             prediction = model.get_model()(img=[image], img_metas=[metas], return_loss=False, rescale=True)
@@ -578,6 +586,10 @@ def branch_probe_payload(model, image, vi, metas, valid, metadata, unavailable_w
             sha256=metadata.get('checkpoint_sha256'), state_sha256=metadata.get('state_sha256'),
             iteration=metadata.get('iter'), capture_mode=metadata.get('capture_mode'))
         if 'w_before_struct' in payload and 'w_after_struct' in payload:
+            for key in ('confidence_available', 'continuity_available', 'evidence_count',
+                        'target_cross_neighbor_count', 'source_cross_prior_available'):
+                if key in maps:
+                    payload[key] = maps[key]
             enriched, metadata = prepare_struct_evidence(payload, metadata)
             payload.update(enriched)
             metadata['tensor_shapes'].update({key: list(value.shape) for key, value in enriched.items() if value.ndim == 2})
@@ -685,6 +697,12 @@ class MechanismCollector:
             proto_target_update_start=model.proto_gate.target_update_start if self.modules['proto'] else None)
         if self.modules['phy'] and getattr(model, 'phy_mode', 'legacy_binary') == 'hierarchical_gv':
             self.manifest['phy_gate'] = dict(model.phy_gate_params)
+        if self.modules['struct'] and model.struct_gate.fusion_mode == 'struct_distinct_v1':
+            self.manifest['struct_cfg'] = dict(model.struct_cfg)
+            self.manifest['struct_gate_initial_strength'] = model.struct_gate.gate_strength(0)
+            self.manifest['struct_warmup_start'] = (
+                0 if model.struct_gate.struct_gate_schedule == 'early_nonzero_linear'
+                else model.struct_gate.struct_warmup_iters)
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / 'manifest.json'
         if path.exists():

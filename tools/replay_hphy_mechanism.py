@@ -47,7 +47,8 @@ def verify_protocol(config, physiology, structural=False):
                   ('phy_cfg', 'struct_cfg', 'proto_cfg', 'struct_edge_cfg'))
     if flags != (physiology, structural, False, False) or config.uda.get('joint_gate_cfg', {}).get('enable', False):
         raise ValueError('Expected the requested Baseline, phy-only or struct-only configuration')
-    if structural and (config.uda.struct_cfg.get('fusion_mode') != 'doris_confidence_guided' or
+    if structural and (config.uda.struct_cfg.get('fusion_mode', 'legacy_product') not in
+                       ('legacy_product', 'doris_confidence_guided', 'struct_distinct_v1') or
                        not config.uda.struct_cfg.get('use_target_gate', True)):
         raise ValueError('The structural checkpoint must use the enabled DORIS structural gate')
     if (config.runner.max_iters != 15000 or config.model.backbone.type != 'mit_b5' or

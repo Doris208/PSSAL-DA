@@ -21,7 +21,7 @@ class LauncherTests(unittest.TestCase):
             (self.root / directory).mkdir(parents=True)
         source = (ROOT / 'scripts/run_doris_tableiv_26rgb_to_30rgb_hphy15k.sh').read_text()
         self.source = source.replace(
-            '/root/shared-nvme/work_dirs/doris_hphy_early4k/goji26RGB2goji30RGB', '$PWD/results')
+            '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26RGB2goji30RGB', '$PWD/results')
         (self.root / 'scripts/run.sh').write_bytes(self.source.encode('utf-8'))
         direction = 'goji26RGB2goji30RGB'
         configs = self.root / 'configs/hrda/doris' / direction
@@ -107,7 +107,7 @@ if [[ ${HPHY_TEST_FAIL:-} == 1 && $2 == *_phy_gate.py ]]; then exit 23; fi
             self.assertEqual(command[2], config)
             self.assertTrue((ROOT / config).is_file())
             directory = command[command.index('--work-dir') + 1]
-            self.assertEqual(directory, '/root/shared-nvme/work_dirs/doris_hphy_early4k/'
+            self.assertEqual(directory, '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/'
                 'goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi' + suffix)
             directories.append(directory)
         self.assertEqual(len(set(directories)), 8)
