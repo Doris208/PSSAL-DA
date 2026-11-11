@@ -62,6 +62,26 @@ def readonly_probe(model):
             torch.cuda.set_rng_state_all(cuda_rng)
 
 
+def student_test_metadata(model, image, metas):
+    """Describe the existing Student test interface used for a display prediction."""
+    student = model.get_model()
+    normalization = metas[0].get('img_norm_cfg')
+    if normalization is not None:
+        normalization = {key: value.tolist() if isinstance(value, (np.ndarray, np.generic)) else deepcopy(value)
+                         for key, value in normalization.items()}
+    return dict(model_identity='Student', prediction_field='struct_prediction',
+        forward_call='get_model()(img=[image], img_metas=[metas], return_loss=False, rescale=True)',
+        class_reduction='argmax(dim=1)', eval=True, rescale=True,
+        test_cfg=deepcopy(getattr(student, 'test_cfg', None)),
+        scales=deepcopy(getattr(student, 'scales', None)),
+        hr_crop_size=deepcopy(getattr(student, 'crop_size', None)),
+        hr_slide_inference=getattr(student, 'hr_slide_inference', None),
+        fp16_enabled=bool(getattr(student, 'fp16_enabled', False)),
+        input_shape=list(image.shape), input_dtype=str(image.dtype),
+        input_normalization=normalization,
+        flip=metas[0].get('flip', False), display_crop=[30, 30, 226, 226])
+
+
 MODULES = ('phy', 'struct', 'proto', 'edge')
 MEANS = ('w_conf', 'w_base', 'r_phy', 'w_t_phy', 'w_t_ps', 'w_pre_proto',
          'w_t_proto', 'w_final', 'r_struct', 'e_prob', 'e_img', 'r_pair',
@@ -540,6 +560,29 @@ def branch_probe_payload(model, image, vi, metas, valid, metadata, unavailable_w
     view = image[0,:3].detach().float().cpu().numpy().transpose(1,2,0)
     payload['target_image'] = np.clip((view*np.asarray(norm['std'][:3]) +
         np.asarray(norm['mean'][:3]))/255,0,1).astype(np.float32)
+    if metadata['modules'] == dict(phy=False, struct=True, proto=False, edge=False):
+        from tools.doris_struct_evidence import prepare_struct_evidence, struct_statistics
+        metadata['struct_cfg'] = dict(model.struct_cfg, eps=model.struct_gate.eps)
+        metadata['struct_probability_dtype'] = 'float16' if image.is_cuda else 'float32'
+        with readonly_probe(model):
+            prediction = model.get_model()(img=[image], img_metas=[metas], return_loss=False, rescale=True)
+        if len(prediction) != 1 or np.asarray(prediction[0]).shape != (256, 256):
+            raise ValueError('Structural Student test prediction must cover the native 256 grid')
+        predicted_classes = np.asarray(prediction[0])
+        if predicted_classes.dtype.kind not in 'iu' or not np.isin(predicted_classes, [0, 1, 2, 3, 4]).all():
+            raise ValueError('Structural Student test output must contain class IDs 0..4')
+        payload['struct_prediction'] = predicted_classes.astype(np.uint8, copy=True)
+        metadata['prediction_identity'] = 'Student test-mode prediction'
+        metadata['student_inference'] = student_test_metadata(model, image, metas)
+        metadata['prediction_checkpoint'] = dict(path=metadata.get('checkpoint'),
+            sha256=metadata.get('checkpoint_sha256'), state_sha256=metadata.get('state_sha256'),
+            iteration=metadata.get('iter'), capture_mode=metadata.get('capture_mode'))
+        if 'w_before_struct' in payload and 'w_after_struct' in payload:
+            enriched, metadata = prepare_struct_evidence(payload, metadata)
+            payload.update(enriched)
+            metadata['tensor_shapes'].update({key: list(value.shape) for key, value in enriched.items() if value.ndim == 2})
+            if metadata['struct_validation']['passed']:
+                metadata['struct_statistics'] = struct_statistics(enriched, metadata)
     payload['metadata'] = np.array(json.dumps(metadata,sort_keys=True))
     return payload
 

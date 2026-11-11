@@ -232,6 +232,15 @@ def phy_weight_statistics(maps):
 
 
 def online_plate(nodes, kind):
+    if kind == 'struct' and len(nodes) == 1:
+        from tools.doris_struct_evidence import prepare_struct_evidence
+        from tools.struct_mechanism_panels import COMPONENTS, display_scales, panel_figure
+        from tools.build_hphy_mechanism_figure import crop_arrays
+        info = nodes[0].get('description', json.loads(str(nodes[0]['metadata'])))
+        if info.get('struct_cfg') or info.get('gate'):
+            arrays, metadata = prepare_struct_evidence(nodes[0], info)
+            center = crop_arrays(arrays)
+            return panel_figure(center, COMPONENTS, 'formal', display_scales(center, metadata, 'formal'), metadata)
     panels = dict(phys=('target_image','w_conf','r_phy','delta_w_phy'),
         struct=('target_image','r_conf','r_loc','r_adj','r_prob','r_struct'),
         mparc=('target_image','r_phy','r_struct','w_before_mparc','w_after_mparc','delta_w_mparc'),
@@ -434,10 +443,16 @@ def export_hphy_native_panels(maps, output, completed, stamp):
                         subfolder='center196')
 
 
-def render_online_node(maps, output, completed, array_sha256='', render_timing='after_train_iter'):
+def render_online_node(maps, output, completed, array_sha256='', render_timing='after_train_iter',
+                       dpi=600, font_size=9):
     """CPU-only PNGs from one already-computed probe; return only verified files."""
     info=json.loads(str(maps['metadata']))
     if int(info['iter'])!=completed:raise ValueError('PNG and NPZ iterations differ')
+    if online_kinds(maps) == ('struct',):
+        from tools.struct_mechanism_panels import render_struct_bundle
+        folder = Path(output)/'struct_v4'/('iter_{:06d}'.format(completed))
+        rendered = render_struct_bundle(maps, folder, source_sha256=array_sha256, dpi=dpi, font_size=font_size)
+        return [rendered/'struct_formal_group_1x7.png']
     spatial_statistics(maps)
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
     files=[]
@@ -999,6 +1014,8 @@ def branch_plate(nodes, branch, source_csv):
         ready = [n for n in nodes if n.get('adjacency_available',np.array(False)).any()
                  and n.get('semantic_available',np.array(False)).any() and n['valid_mask'].any()]
         chosen = [ready[-1] if ready else nodes[-1]]
+        if chosen[0]['description'].get('struct_cfg') or chosen[0]['description'].get('gate'):
+            return online_plate(chosen, 'struct'), [chosen[0]['description']['iter']]
         names = ('target_image','r_conf','r_loc','r_adj','r_prob','r_struct')
         fig,axes = plt.subplots(1,6,figsize=(7.2,2.1),squeeze=False,constrained_layout=True)
     else:

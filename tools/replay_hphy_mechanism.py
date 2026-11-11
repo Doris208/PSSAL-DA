@@ -42,11 +42,14 @@ TARGET_FILES = [
 OUTPUT_ROOT = Path('/root/shared-nvme/work_dirs/doris_hphy_early4k/goji26RGB2goji30RGB/hphy_mechanism_26rgb2_30rgb')
 
 
-def verify_protocol(config, physiology):
+def verify_protocol(config, physiology, structural=False):
     flags = tuple(bool(config.uda.get(key, {}).get('enable', False)) for key in
                   ('phy_cfg', 'struct_cfg', 'proto_cfg', 'struct_edge_cfg'))
-    if flags != (physiology, False, False, False) or config.uda.get('joint_gate_cfg', {}).get('enable', False):
-        raise ValueError('Only the Baseline and phy-only Table IV configurations are supported')
+    if flags != (physiology, structural, False, False) or config.uda.get('joint_gate_cfg', {}).get('enable', False):
+        raise ValueError('Expected the requested Baseline, phy-only or struct-only configuration')
+    if structural and (config.uda.struct_cfg.get('fusion_mode') != 'doris_confidence_guided' or
+                       not config.uda.struct_cfg.get('use_target_gate', True)):
+        raise ValueError('The structural checkpoint must use the enabled DORIS structural gate')
     if (config.runner.max_iters != 15000 or config.model.backbone.type != 'mit_b5' or
             config.model.backbone.in_chans != 6 or config.model.decode_head.num_classes != 5):
         raise ValueError('Both models must use MiT-B5, six channels, five classes and a 15K protocol')
@@ -132,7 +135,8 @@ def data_protocol(config):
     return data
 
 
-def load_model(config, checkpoint_path, physiology, device, work_dir, explicit_iter=None):
+def load_model(config, checkpoint_path, physiology, device, work_dir, explicit_iter=None,
+               structural=False):
     from mmcv import Config
     from mmcv.runner import wrap_fp16_model
     from mmseg.models.builder import build_train_model
@@ -145,7 +149,7 @@ def load_model(config, checkpoint_path, physiology, device, work_dir, explicit_i
     if not meta.get('config'):
         raise ValueError('Checkpoint lacks its saved training configuration')
     historical = Config.fromstring(meta['config'], '.py')
-    verify_protocol(historical, physiology)
+    verify_protocol(historical, physiology, structural)
     runtime = deepcopy(config)
     schedule_info = {}
     if physiology:
