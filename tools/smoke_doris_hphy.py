@@ -2,10 +2,12 @@
 import argparse
 import gc
 import json
+import logging
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -13,13 +15,17 @@ from mmcv.runner import build_optimizer, save_checkpoint
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.check_doris_hphy_configs import EXPERIMENTS, check_config, config_path
+from tools.doris_probe_data import RGB30_DIRECTIONS
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--direction', choices=RGB30_DIRECTIONS, default=RGB30_DIRECTIONS[0])
     parser.add_argument('--experiments', nargs='+', type=int, choices=range(1, 9), default=[2, 4, 8])
     parser.add_argument('--output', required=True, help='New directory, refused if it already exists')
+    parser.add_argument('--check-fixed-probes', action='store_true',
+                        help='Initialize production collectors and export real fixed-input probes using the configured dataset')
     args = parser.parse_args()
     device = torch.device(args.device)
     if device.type == 'cuda' and not torch.cuda.is_available():
@@ -33,7 +39,7 @@ def main():
     from mmseg.models.uda.phy_reliability import phy_gate_strength
 
     torch.set_num_threads(2)
-    report = dict(device=str(device), torch=torch.__version__, synthetic=True,
+    report = dict(device=str(device), direction=args.direction, torch=torch.__version__, synthetic=True,
                   git_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                   initialization='Random model weights, pretrained paths disabled only in this smoke',
                   teacher_fixture='Real EMA network with controlled classifier biases to exercise high-confidence target supervision',
@@ -41,7 +47,7 @@ def main():
     for number in args.experiments:
         name, suffix, flags = EXPERIMENTS[number - 1]
         print('{} constructing full HRDA/DACS model'.format(name), flush=True)
-        cfg, audit = check_config(config_path(suffix), flags)
+        cfg, audit = check_config(config_path(suffix, args.direction), flags)
         cfg.model.pretrained = None
         cfg.model.backbone.pretrained = None
         cfg.model.train_cfg.work_dir = str(output)
@@ -125,6 +131,14 @@ def main():
                 raise AssertionError('H-Phy source gradient missing in ' + name)
             if flags[0] and logs['loss_phy_tgt_veg_weighted'] <= 0:
                 raise AssertionError('Controlled Teacher failed to exercise target vegetation BCE')
+            if flags[1]:
+                gate = model.struct_gate
+                if not gate.source_adj_initialized.any() or not gate.semantic_proto_initialized.any():
+                    raise AssertionError('Source structural EMA priors were not initialized')
+                expected_strength = .10 + .90 * min(iteration / 4000., 1.)
+                if (abs(gate.gate_strength(iteration) - expected_strength) > 1e-7 or
+                        gate.feature_strength(iteration, 6000, 4000) != gate.gate_strength(iteration)):
+                    raise AssertionError('Structural supervision and feature schedules differ')
             expected_mixed = torch.where(trace['mix_mask'], torch.ones_like(trace['final_weight']),
                                          trace['final_weight'])
             torch.testing.assert_close(trace['mixed_weight'], expected_mixed)
@@ -148,9 +162,12 @@ def main():
         model.get_model().forward_train = original_forward
         # Same-model checkpoint/optimizer restoration, including all branch banks.
         with tempfile.TemporaryDirectory(prefix='checkpoint_', dir=str(output)) as temporary:
-            checkpoint_path = Path(temporary) / 'smoke.pth'
+            from mmseg.utils.checkpoint_policy import prepare_save
+            checkpoint_path = Path(temporary) / ('iter_{}.pth'.format(model.local_iter))
+            runner = SimpleNamespace(model=model, optimizer=optimizer, meta={}, iter=model.local_iter-1)
+            prepare_save(runner, checkpoint_path)
             save_checkpoint(model, str(checkpoint_path), optimizer=optimizer,
-                            meta=dict(config=cfg.pretty_text, iter=model.local_iter,
+                            meta=dict(runner.meta, config=cfg.pretty_text, iter=model.local_iter,
                                       head_version=getattr(model, 'phy_mode', 'disabled'),
                                       phy_cfg=dict(model.phy_cfg), phy_gate=getattr(model, 'phy_gate_params', {})))
             before = model_digest(model)
@@ -166,6 +183,20 @@ def main():
                         states={}, input_view=['R', 'G', 'B'])
         payload = branch_probe_payload(model, image[:1], vi[:1], metas[:1], valid[:1], metadata)
         np.savez_compressed(str(output / (name.lower() + '_probe.npz')), **payload)
+        if flags[1]:
+            required = {'r_conf', 'r_loc', 'r_adj', 'r_prob', 'r_struct',
+                        'adjacency_available', 'semantic_available', 'evidence_count',
+                        'w_before_struct', 'w_after_struct', 'w_final'}
+            if required - set(payload):
+                raise AssertionError('Structural V2 probe fields missing')
+        if args.check_fixed_probes and any(flags):
+            from mmseg.utils.mechanism import MechanismCollector
+            runner = SimpleNamespace(iter=model.local_iter-1, work_dir=str(output / name.lower()),
+                meta=dict(config=cfg.pretty_text), mechanism_config=cfg, resume_from=None,
+                logger=logging.getLogger('smoke'))
+            collector = MechanismCollector(runner, model)
+            collector.snapshot(model.local_iter)
+            del collector, runner
         with readonly_probe(model):
             prediction = model.get_model().simple_test(image[:1], metas[:1], rescale=True)
         if len(prediction) != 1 or prediction[0].shape != (256, 256):
@@ -173,9 +204,11 @@ def main():
         report['experiments'].append(dict(audit, name=name, runs=runs,
             parameters=sum(p.numel() for p in model.parameters()),
             hphy_parameters=sum(p.numel() for p in model.phy_head.parameters()) if flags[0] else 0,
-            checkpoint_roundtrip=True, student_validation=True, probe_export=True))
+            checkpoint_roundtrip=True, checkpoint_space_check=True,
+            student_validation=True, probe_export=True, fixed_probe_collector=args.check_fixed_probes and any(flags)))
         (output / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         print('{} PASS on {}'.format(name, device), flush=True)
+        del original_forward, capture_forward, capture_masks, capture_record, scope
         del model, optimizer, data, image, vi, gt, valid, payload
         gc.collect()
         if device.type == 'cuda':

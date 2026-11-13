@@ -222,6 +222,7 @@ class HPhyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'mode mismatch'):
                 legacy_model.load_state_dict(incomplete_hphy, strict=False)
 
+    @unittest.skipUnless(importlib.util.find_spec('matplotlib'), 'Matplotlib is required for panel rendering')
     def test_online_probe_exports_conditional_maps_and_four_panel_titles(self):
         from test_doris_mechanism import MechanismTests
         from tools.build_doris_mechanism_figures import online_plate
@@ -266,15 +267,23 @@ class HPhyTests(unittest.TestCase):
     def test_disabled_configs_and_non_phy_parameters_are_unchanged(self):
         paths = sorted((ROOT / 'configs').rglob('doris_*.py'))
         disabled = 0
+        upgraded = 0
         for path in paths:
             relative = path.relative_to(ROOT).as_posix()
             cfg = helpers.static_config(relative)
             if not cfg.get('uda', {}).get('phy_cfg', {}).get('enable', False):
-                old = subprocess.check_output(['git', 'show', 'ef089d4:' + relative], cwd=ROOT)
-                self.assertEqual(path.read_text(encoding='utf-8'),
-                                 old.decode('utf-8').replace('\r\n', '\n'))
+                if relative.startswith('configs/hrda/doris/goji26IRRG2goji30RGB/'):
+                    # This task intentionally upgrades the non-Phy branches too.
+                    self.assertFalse(cfg['uda']['phy_cfg']['enable'])
+                    self.assertIn('/doris_struct_distinct_v2/', cfg['work_dir'])
+                    upgraded += 1
+                else:
+                    old = subprocess.check_output(['git', 'show', '1377b878:' + relative], cwd=ROOT)
+                    self.assertEqual(path.read_text(encoding='utf-8'),
+                                     old.decode('utf-8').replace('\r\n', '\n'))
                 disabled += 1
         self.assertEqual(disabled, 20)
+        self.assertEqual(upgraded, 5)
         for _, suffix, _ in __import__('tools.check_doris_hphy_configs', fromlist=['EXPERIMENTS']).EXPERIMENTS:
             model = self.model(suffix)
             self.assertEqual(model.phy_head is not None, suffix in ('_phy_gate', '_phy_struct_gate', '_proto_struct_edge'))

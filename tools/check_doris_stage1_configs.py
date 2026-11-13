@@ -37,7 +37,8 @@ def check_config(cfg, expected, doris_full=False):
     losses = losses if isinstance(losses, list) else [losses]
     boundary_losses = [x for x in losses if x.get('type') == 'StructEdgeLoss']
     if doris_full:
-        structural_v2 = cfg.get('name', '').startswith('doris_goji26RGB2goji30RGB_')
+        structural_v2 = any(cfg.get('name', '').startswith('doris_' + direction + '_')
+                            for direction in ('goji26RGB2goji30RGB', 'goji26IRRG2goji30RGB'))
         assert struct_mode == ('struct_distinct_v1' if structural_v2 else 'doris_confidence_guided')
         assert edge_mode == 'doris_reliable'
         assert len(boundary_losses) == 1
@@ -56,7 +57,7 @@ def check_config(cfg, expected, doris_full=False):
         assert uda['mechanism_logging'] and uda['fixed_probe_enabled']
         assert uda['mechanism_summary_interval'] == uda['fixed_probe_interval'] == 500
         assert uda['mechanism_sample_interval'] == 100
-        expected_samples = 6 if cfg['name'].startswith('doris_goji26RGB2goji30RGB_') else 1
+        expected_samples = 6 if structural_v2 else 1
         assert uda['fixed_probe_max_samples'] == expected_samples
         assert len(uda.get('fixed_probe_filenames', [])) == (6 if expected_samples == 6 else 0)
         assert uda['mechanism_save_raw'] and uda['mechanism_make_figures']

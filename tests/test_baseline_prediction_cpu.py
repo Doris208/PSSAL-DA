@@ -50,6 +50,12 @@ def attributes(value):
 @unittest.skipIf(torch is None, 'Torch is required for the production loader and inference')
 class BaselineCPU(unittest.TestCase):
     def test_strict_checkpoint_student_identity_and_unchanged_state(self):
+        self.check_checkpoint('goji26RGB2goji30RGB', 4000)
+
+    def test_irrg_15k_checkpoint_student_identity_and_unchanged_state(self):
+        self.check_checkpoint('goji26IRRG2goji30RGB', 15000)
+
+    def check_checkpoint(self, direction, iteration):
         shared = ROOT/'tools/replay_hphy_mechanism.py'
         common = ROOT/'tools/replay_doris_mechanisms.py'
         scope = dict(torch=torch, np=np, Path=Path, deepcopy=copy.deepcopy, re=re, json=json, hashlib=hashlib)
@@ -60,7 +66,7 @@ class BaselineCPU(unittest.TestCase):
             load_function(common, name, scope)
         for name in ('verify_protocol', 'resolve_iteration', 'data_protocol', 'load_model', 'infer_model'):
             load_function(shared, name, scope)
-        cfg = attributes(static_config('configs/hrda/doris/goji26RGB2goji30RGB/doris_goji26RGB2goji30RGB_hrda_3vi.py'))
+        cfg = attributes(static_config('configs/hrda/doris/' + direction + '/doris_' + direction + '_hrda_3vi.py'))
         spec = importlib.util.spec_from_file_location('baseline_mechanism_cpu', ROOT/'mmseg/utils/mechanism.py')
         mechanism = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mechanism)
@@ -100,14 +106,17 @@ class BaselineCPU(unittest.TestCase):
         torch.set_num_threads(1)
         with tempfile.TemporaryDirectory(dir=ROOT/'outputs') as temporary, patch.dict(sys.modules, modules):
             folder = Path(temporary)
-            path = folder/'iter_4000.pth'
+            path = folder / ('best_mIoU_iter_' + str(iteration) + '.pth')
             original = Model()
+            historical_cfg = copy.deepcopy(cfg)
+            historical_cfg.uda.pop('source_input_channel_order', None)
+            historical_cfg.uda.pop('target_input_channel_order', None)
             checkpoint = dict(state_dict=original.state_dict(),
-                meta=dict(iter=3999, config=repr(dict(cfg)), synthetic_fixture=True))
+                meta=dict(iter=iteration-1, config=repr(dict(historical_cfg)), synthetic_fixture=True))
             torch.save(checkpoint, path)
             before_file = digest(path)
             model, info = scope['load_model'](cfg, path, False, torch.device('cpu'), folder)
-            self.assertEqual(info['completed_iter'], 4000)
+            self.assertEqual(info['completed_iter'], iteration)
             sample = (torch.rand(1, 6, 256, 256), torch.zeros(1, 3, 256, 256), [{}])
             arrays, state = scope['infer_model'](model, sample, {}, False)
             np.testing.assert_array_equal(arrays['baseline_prediction'], 4)
@@ -118,7 +127,7 @@ class BaselineCPU(unittest.TestCase):
             self.assertFalse(any(parameter.grad is not None for parameter in model.parameters()))
             self.assertEqual(calls, [dict(eval=True, gradient=False, inference=True,
                 shape=(1, 6, 256, 256), rescale=True, return_loss=False)])
-            for issue in ('missing', 'extra', 'shape', 'nonfinite', 'iteration', 'branch'):
+            for issue in ('missing', 'extra', 'shape', 'nonfinite', 'iteration', 'missing_counter', 'branch', 'direction'):
                 changed = copy.deepcopy(checkpoint)
                 key = next(iter(changed['state_dict']))
                 if issue == 'missing': changed['state_dict'].pop(key)
@@ -126,13 +135,26 @@ class BaselineCPU(unittest.TestCase):
                 if issue == 'shape': changed['state_dict'][key] = torch.zeros(1)
                 if issue == 'nonfinite': changed['state_dict'][key].fill_(float('nan'))
                 if issue == 'iteration': changed['meta']['iter'] = 12000
+                if issue == 'missing_counter': changed['meta'].pop('iter')
                 if issue == 'branch':
                     historical = copy.deepcopy(cfg)
                     historical.uda.struct_cfg.enable = True
                     changed['meta']['config'] = repr(dict(historical))
+                if issue == 'direction':
+                    other = ('goji26RGB2goji30RGB' if 'IRRG' in direction else 'goji26IRRG2goji30RGB')
+                    historical = static_config('configs/hrda/doris/' + other + '/doris_' + other + '_hrda_3vi.py')
+                    changed['meta']['config'] = repr(historical)
                 torch.save(changed, path)
                 with self.subTest(issue=issue), self.assertRaises(ValueError):
                     scope['load_model'](cfg, path, False, torch.device('cpu'), folder)
+            current = attributes(static_config('configs/hrda/doris/' + direction + '/doris_' +
+                direction + '_hrda_3vi_struct_gate.py'))
+            historical = copy.deepcopy(current)
+            historical.uda.struct_cfg.fusion_mode = 'doris_confidence_guided'
+            checkpoint['meta']['config'] = repr(dict(historical))
+            torch.save(checkpoint, path)
+            with self.assertRaisesRegex(ValueError, 'configuration differs from checkpoint provenance'):
+                scope['load_model'](current, path, False, torch.device('cpu'), folder, structural=True)
 
 
 if __name__ == '__main__':

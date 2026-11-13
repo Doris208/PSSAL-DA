@@ -144,6 +144,7 @@ def select_checkpoints(records, iterations=None, pilot=False):
 def inference_signature(config):
     ignored = {'pretrained', 'init_cfg', 'work_dir', 'output_mode', 'paper_process_logging',
                'doris_process_logging', 'doris_log_interval', 'physiology_collection',
+               'source_input_channel_order', 'target_input_channel_order',
                'log_stats', 'log_class_stats', 'collect_debug'}
 
     def clean(value):

@@ -7,7 +7,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from mmcv import Config
+from tools.check_doris_stage1_ablation_configs import STRUCT_V2_DIRECTIONS
 
 
 DIRECTION = 'goji26RGB2goji30RGB'
@@ -29,7 +29,9 @@ def config_path(suffix, direction=DIRECTION):
 
 
 def check_config(path, expected=None):
+    from mmcv import Config
     cfg = Config.fromfile(str(path))
+    direction = cfg.name_dataset.rsplit('_256x256_3vi', 1)[0]
     flags = tuple(bool(cfg.uda.get(key, {}).get('enable', False)) for key in
                   ('phy_cfg', 'struct_cfg', 'proto_cfg', 'struct_edge_cfg'))
     assert expected is None or flags == expected, (path, flags, expected)
@@ -47,7 +49,7 @@ def check_config(path, expected=None):
     edge_losses = [loss for loss in losses if loss.type == 'StructEdgeLoss']
     assert len(edge_losses) == int(flags[3]), path
     if flags[1]:
-        if DIRECTION in cfg.name:
+        if direction in STRUCT_V2_DIRECTIONS:
             from tools.check_doris_stage1_ablation_configs import STRUCT_V2_OVERRIDES
             for key, value in STRUCT_V2_OVERRIDES.items():
                 assert cfg.uda.struct_cfg[key] == value, (path, key)
@@ -78,10 +80,10 @@ def check_config(path, expected=None):
                         phy_target_supervision_mode='balanced_high_conf')
         for key, value in required.items():
             assert cfg.uda.phy_cfg[key] == value, (path, key)
-        if DIRECTION not in cfg.name:
+        if direction not in STRUCT_V2_DIRECTIONS:
             assert '/doris_hphy_early4k/' in cfg.work_dir and cfg.work_dir.endswith('_hphy_early4k'), path
-    if DIRECTION in cfg.name:
-        expected_work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/' + DIRECTION + '/' + Path(path).stem[6:]
+    if direction in STRUCT_V2_DIRECTIONS:
+        expected_work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/' + direction + '/' + Path(path).stem[6:]
         assert cfg.work_dir == expected_work_dir, path
     return cfg, dict(config=Path(path).relative_to(ROOT).as_posix(),
                      iterations=cfg.runner.max_iters, channels=cfg.model.backbone.in_chans,
@@ -96,10 +98,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--experiment', choices=[str(i) for i in range(1, 9)] + ['all'], default='all')
     parser.add_argument('--all-directions', action='store_true')
+    parser.add_argument('--direction', choices=STRUCT_V2_DIRECTIONS, default=DIRECTION)
     args = parser.parse_args()
     rows, reference = [], None
     for number, (name, suffix, flags) in enumerate(EXPERIMENTS, 1):
-        cfg, row = check_config(config_path(suffix), flags)
+        cfg, row = check_config(config_path(suffix, args.direction), flags)
         protocol = dict(data=cfg.data, seed=cfg.seed, optimizer=cfg.optimizer,
                         lr_config=cfg.lr_config, evaluation=cfg.evaluation,
                         backbone=cfg.model.backbone, runner=cfg.runner)
@@ -109,8 +112,8 @@ def main():
         if args.experiment not in ('all', str(number)):
             continue
         row.update(number=number, name=name, launch_work_dir=(
-            '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/' + DIRECTION + '/'
-            + DIRECTION + '_hrda_3vi' + suffix))
+            '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/' + args.direction + '/'
+            + args.direction + '_hrda_3vi' + suffix))
         rows.append(row)
     if args.all_directions:
         for direction in ('goji26IRRG2goji30RGB', 'goji30IRRG2goji26IRRG'):

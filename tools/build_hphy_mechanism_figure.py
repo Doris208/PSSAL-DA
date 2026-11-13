@@ -17,6 +17,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.doris_phy_evidence import error_auc
+from tools.doris_probe_data import RGB30_DIRECTIONS
 
 CROP = (30, 30, 226, 226)  # x1, y1, x2, y2, exclusive upper bounds
 GOJI = runpy.run_path(str(ROOT / 'mmseg/datasets/goji_meta.py'))
@@ -66,8 +67,8 @@ def validate_arrays(arrays, meta, tolerance=1e-5):
     missing = sorted(set(REQUIRED) - set(arrays))
     if missing:
         raise ValueError('Missing mechanism arrays: ' + ', '.join(missing))
-    if meta.get('direction') != 'goji26RGB2goji30RGB':
-        raise ValueError('This plate requires the RGB26 to RGB30 direction')
+    if meta.get('direction') not in RGB30_DIRECTIONS:
+        raise ValueError('This plate requires a supported 26-to-RGB30 direction')
     if meta.get('prediction_network') != 'Student' or meta.get('teacher_network') != 'H-Phy EMA Teacher':
         raise ValueError('Teacher/official Student prediction identities differ from the protocol')
     if meta.get('class_palette') != PALETTE.tolist():

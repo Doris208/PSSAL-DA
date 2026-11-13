@@ -51,7 +51,8 @@ def validate_arrays(arrays, meta, tolerance=1e-5):
         'gate_active_mask', 'below_threshold_mask', *METRICS}
     if required - set(arrays):
         raise ValueError('Missing structural arrays: ' + ', '.join(sorted(required-set(arrays))))
-    if (meta.get('direction') != 'goji26RGB2goji30RGB' or
+    from tools.doris_probe_data import RGB30_DIRECTIONS
+    if (meta.get('direction') not in RGB30_DIRECTIONS or
             meta.get('teacher_network') != 'Struct EMA Teacher' or meta.get('prediction_network') != 'Student' or
             meta.get('class_palette') != PALETTE.tolist()):
         raise ValueError('Structural direction, network identity or palette differs from protocol')

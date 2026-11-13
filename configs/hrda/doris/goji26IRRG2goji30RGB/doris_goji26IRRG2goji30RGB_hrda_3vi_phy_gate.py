@@ -34,10 +34,18 @@ uda.update(
     mechanism_output_mode='branches', mechanism_detailed_output=False,
     mechanism_online_plot=True, mechanism_strict=True,
     mechanism_summary_interval=500, fixed_probe_enabled=True,
-    fixed_probe_interval=500, fixed_probe_max_samples=1, fixed_probe_index=0,
+    fixed_probe_interval=500, fixed_probe_max_samples=6, fixed_probe_index=0,
+    fixed_probe_filenames=[
+        '3_1536_640_1792_896.tif',
+        '3_1024_1280_1280_1536.tif',
+        '3_256_1152_512_1408.tif',
+        '3_1536_512_1792_768.tif',
+        '3_1536_1024_1792_1280.tif',
+        '3_1792_1280_2048_1536.tif',
+    ],
     mechanism_save_raw=True, mechanism_make_figures=True)
 
-work_dir = '/root/shared-nvme/work_dirs/doris_hphy_early4k/goji26IRRG2goji30RGB/goji26IRRG2goji30RGB_hrda_3vi_phy_gate_hphy_early4k'
+work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26IRRG2goji30RGB/goji26IRRG2goji30RGB_hrda_3vi_phy_gate'
 name = 'doris_goji26IRRG2goji30RGB_hrda_3vi_phy_gate_hphy_early4k'
 exp = 'doris_stage1_ablation'
 name_uda = 'doris_physiology'

@@ -102,7 +102,8 @@ class BranchOutputTests(unittest.TestCase):
             with np.load(paths[0]) as a,np.load(paths[1]) as b:
                 self.assertIn('w_before_struct',a);self.assertIn('w_before_proto',a)
                 self.assertIn('teacher_pseudo_boundary',a);self.assertIn('edge_supervision',a)
-                self.assertNotIn('e_prob',a);self.assertNotIn('e_img',a);self.assertNotIn('r_pair',a)
+                for key in ('e_prob', 'e_img', 'r_pair', 'boundary_weight', 'w_base', 'w_final'):
+                    self.assertIn(key, a)
                 np.testing.assert_array_equal(a['target_image'],b['target_image'])
                 self.assertTrue((a['edge_supervision'][~a['teacher_pseudo_boundary']]==0).all())
             for key,value in model.state_dict().items():torch.testing.assert_close(value,state[key],rtol=0,atol=0)

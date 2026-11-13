@@ -21,8 +21,15 @@ uda['phy_cfg'].update(
 uda.update(physiology_collection=True)
 
 uda['struct_cfg'].update(
-    fusion_mode='doris_confidence_guided',
-    continuity_weight=0.40, adjacency_weight=0.30, semantic_weight=0.30)
+    fusion_mode='struct_distinct_v1',
+    adjacency_mode='cross_class_conditional_v1',
+    semantic_score_mode='probability_margin_v1',
+    confidence_weight=0.15, continuity_weight=0.30,
+    adjacency_weight=0.30, semantic_weight=0.25,
+    adj_cross_uniform_smoothing=0.10, adj_min_cross_mass=0.01,
+    semantic_temperature=0.15,
+    struct_gate_schedule='early_nonzero_linear',
+    struct_gate_initial_strength=0.10, struct_gate_full_iter=4000)
 
 # Match Full's basic logging; module-specific losses are retained.
 uda.update(doris_process_logging=False, doris_log_interval=1000)
@@ -37,10 +44,18 @@ uda.update(
     mechanism_output_mode='branches', mechanism_detailed_output=False,
     mechanism_online_plot=True, mechanism_strict=True,
     mechanism_summary_interval=500, fixed_probe_enabled=True,
-    fixed_probe_interval=500, fixed_probe_max_samples=1, fixed_probe_index=0,
+    fixed_probe_interval=500, fixed_probe_max_samples=6, fixed_probe_index=0,
+    fixed_probe_filenames=[
+        '3_1536_640_1792_896.tif',
+        '3_1024_1280_1280_1536.tif',
+        '3_256_1152_512_1408.tif',
+        '3_1536_512_1792_768.tif',
+        '3_1536_1024_1792_1280.tif',
+        '3_1792_1280_2048_1536.tif',
+    ],
     mechanism_save_raw=True, mechanism_make_figures=True)
 
-work_dir = '/root/shared-nvme/work_dirs/doris_hphy_early4k/goji26IRRG2goji30RGB/goji26IRRG2goji30RGB_hrda_3vi_phy_struct_gate_hphy_early4k'
+work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26IRRG2goji30RGB/goji26IRRG2goji30RGB_hrda_3vi_phy_struct_gate'
 name = 'doris_goji26IRRG2goji30RGB_hrda_3vi_phy_struct_gate_hphy_early4k'
 exp = 'doris_stage1_ablation'
 name_uda = 'doris_mparc'

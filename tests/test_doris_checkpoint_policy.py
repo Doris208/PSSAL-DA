@@ -49,7 +49,7 @@ class PlanTests(unittest.TestCase):
 
     def test_actual_direction_specific_plans_and_no_fictitious_pair_warmup(self):
         for direction, update, weight in [('goji26RGB2goji30RGB',3000,6000),
-                ('goji26IRRG2goji30RGB',4000,8000),('goji30IRRG2goji26IRRG',3000,6000)]:
+                ('goji26IRRG2goji30RGB',3000,6000),('goji30IRRG2goji26IRRG',3000,6000)]:
             for path in (ROOT/'configs/hrda/doris'/direction).glob('*.py'):
                 cfg=static_config(path.relative_to(ROOT).as_posix()); plan=checkpoint_plan(cfg)
                 self.assertEqual(plan['periodic'],list(range(2000,15000,2000)) + [15000])
@@ -63,7 +63,7 @@ class PlanTests(unittest.TestCase):
                 if path.stem.endswith('_proto_struct_edge'):
                     expected = [3000,3500,4500,5000,5500,6500,10500] if update==3000 else \
                                [4500,5000,5500,6500,8500,10500]
-                    if direction == 'goji26RGB2goji30RGB':
+                    if direction in ('goji26RGB2goji30RGB', 'goji26IRRG2goji30RGB'):
                         expected.remove(10500)
                     self.assertEqual(plan['extra'],expected)
                 if path.stem.endswith('_3vi'):

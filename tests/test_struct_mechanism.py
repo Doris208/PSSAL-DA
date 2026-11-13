@@ -334,10 +334,12 @@ class StructuralLauncherTests(unittest.TestCase):
         source = ROOT/'tools/train.py'
         tree = ast.parse(source.read_text(encoding='utf-8'))
         main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        selection_test = ast.dump(ast.parse('args.work_dir is not None', mode='eval').body)
         selection = next(node for node in main.body if isinstance(node, ast.If) and
-                         ast.unparse(node.test) == 'args.work_dir is not None')
+                         ast.dump(node.test) == selection_test)
+        assignment_target = ast.dump(ast.parse('cfg.model.train_cfg.work_dir = None').body[0].targets[0])
         assignment = next(node for node in main.body if isinstance(node, ast.Assign) and
-                          ast.unparse(node.targets[0]) == 'cfg.model.train_cfg.work_dir')
+                          ast.dump(node.targets[0]) == assignment_target)
         from types import SimpleNamespace
         tree.body = [selection, assignment]
         namespace = dict(cfg=structural, args=SimpleNamespace(work_dir='/tmp/struct-v2-cli'))

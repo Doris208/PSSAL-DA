@@ -1,6 +1,5 @@
 """Replay paired Baseline/Struct checkpoints and export structural mechanism figures."""
 import argparse
-from datetime import datetime
 import hashlib
 import json
 import logging
@@ -114,7 +113,7 @@ def replay(config_struct, checkpoint_struct, config_baseline, checkpoint_baselin
         raise RuntimeError('CUDA unavailable; use --device cpu for a CPU replay')
     cfg_struct = Config.fromfile(str(config_struct))
     cfg_base = Config.fromfile(str(config_baseline))
-    shared.verify_protocol(cfg_struct, False, structural=True)
+    direction = shared.verify_protocol(cfg_struct, False, structural=True)
     shared.verify_protocol(cfg_base, False)
     if shared.data_protocol(cfg_struct) != shared.data_protocol(cfg_base):
         raise ValueError('Baseline and Struct training protocol differs in data')
@@ -220,7 +219,7 @@ def replay(config_struct, checkpoint_struct, config_baseline, checkpoint_baselin
             'mmseg/datasets/pipelines/loading.py', 'mmseg/datasets/pipelines/transforms.py', 'mmseg/vi_utils.py',
             'mmseg/models/uda/uda_decorator.py', 'mmseg/models/segmentors/hrda_encoder_decoder.py',
             'mmseg/models/decode_heads/hrda_head.py']
-        meta = dict(direction='goji26RGB2goji30RGB', sample_id=target_file.name,
+        meta = dict(direction=direction, sample_id=target_file.name,
             target_file=str(target_file), target_sha256=hashes[str(target_file)],
             vi_files={name: dict(path=str(path), sha256=hashes[str(path)]) for name, path in index_paths.items()},
             gt=gt_info, checkpoint_struct=infos[0], checkpoint_baseline=infos[1],
@@ -229,6 +228,7 @@ def replay(config_struct, checkpoint_struct, config_baseline, checkpoint_baselin
             config_baseline=dict(path=str(Path(config_baseline).resolve()), sha256=hashes[str(Path(config_baseline).resolve())],
                 resolved_sha256=hashlib.sha256(cfg_base.pretty_text.encode()).hexdigest()),
             teacher_network='Struct EMA Teacher', prediction_network='Student',
+            capture_mode='checkpoint_replay', prediction_mode='test',
             prediction_identity='Student test-mode prediction',
             student_inference=infos[0]['student_inference'],
             prediction_checkpoint=dict(path=infos[0]['path'], sha256=infos[0]['sha256'],
@@ -286,15 +286,16 @@ def replay(config_struct, checkpoint_struct, config_baseline, checkpoint_baselin
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config-struct', type=Path, default=CONFIG_STRUCT)
-    parser.add_argument('--config-baseline', type=Path, default=CONFIG_BASELINE)
+    parser.add_argument('--direction', choices=shared.RGB30_DIRECTIONS)
+    parser.add_argument('--config-struct', type=Path)
+    parser.add_argument('--config-baseline', type=Path)
     parser.add_argument('--checkpoint', '--checkpoint-struct', dest='checkpoint_struct', type=Path,
                         default=CHECKPOINT_STRUCT, help='Absolute path or relative to STRUCT_WORK_DIR')
     parser.add_argument('--checkpoint-baseline', type=Path, default=CHECKPOINT_BASELINE,
                         help='Absolute path or relative to BASELINE_WORK_DIR')
     for role in ('struct', 'baseline'):
         parser.add_argument('--selection-' + role)
-    parser.add_argument('--target-file', type=Path, nargs='+', default=TARGET_FILES,
+    parser.add_argument('--target-file', type=Path, nargs='+',
                         help='One or more native 256 RGB TIFFs, each replayed independently')
     parser.add_argument('--gt-file')
     parser.add_argument('--out-dir', type=Path)
@@ -309,16 +310,17 @@ def main(argv=None):
     if dpi <= 0 or font_size <= 0:
         parser.error('--dpi and --font-size must be positive')
     roi_coordinates(args['roi'])
+    if args['config_struct'] is None and args['direction'] is None:
+        args['config_struct'] = CONFIG_STRUCT
+        if args['target_file'] is None:
+            args['target_file'] = TARGET_FILES
+    shared.resolve_cli_inputs(args, 'struct', STRUCT_WORK_DIR, OUTPUT_ROOT,
+                              CONFIG_BASELINE, BASELINE_WORK_DIR)
     targets = args.pop('target_file')
     if len({path.stem for path in targets}) != len(targets):
         parser.error('Target image basenames must be unique')
     if len(targets) > 1 and args['gt_file'] is not None:
         parser.error('--gt-file requires a single --target-file')
-    args['checkpoint_struct'] = STRUCT_WORK_DIR / args['checkpoint_struct']
-    args['checkpoint_baseline'] = BASELINE_WORK_DIR / args['checkpoint_baseline']
-    if args['out_dir'] is None:
-        args['out_dir'] = OUTPUT_ROOT / '{}_{}'.format(
-            args['checkpoint_struct'].stem, datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
     run_dir = output_path(args['out_dir'])
     if len(targets) > 1:
         run_dir.mkdir(parents=True, exist_ok=False)

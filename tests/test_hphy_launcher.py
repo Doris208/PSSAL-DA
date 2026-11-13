@@ -13,17 +13,20 @@ BASH = os.environ.get('HPHY_BASH') or shutil.which('bash')
 
 @unittest.skipUnless(BASH, 'Bash is required for launcher execution tests')
 class LauncherTests(unittest.TestCase):
+    direction = 'goji26RGB2goji30RGB'
+    launcher = 'scripts/run_doris_tableiv_26rgb_to_30rgb_hphy15k.sh'
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=str(ROOT / 'outputs'))
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         for directory in ('scripts', 'tools', 'bin'):
             (self.root / directory).mkdir(parents=True)
-        source = (ROOT / 'scripts/run_doris_tableiv_26rgb_to_30rgb_hphy15k.sh').read_text()
+        source = (ROOT / self.launcher).read_text()
         self.source = source.replace(
-            '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26RGB2goji30RGB', '$PWD/results')
+            '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/' + self.direction, '$PWD/results')
         (self.root / 'scripts/run.sh').write_bytes(self.source.encode('utf-8'))
-        direction = 'goji26RGB2goji30RGB'
+        direction = self.direction
         configs = self.root / 'configs/hrda/doris' / direction
         configs.mkdir(parents=True)
         for suffix in ('', '_phy_gate', '_struct_gate', '_phy_struct_gate',
@@ -95,7 +98,7 @@ if [[ ${HPHY_TEST_FAIL:-} == 1 && $2 == *_phy_gate.py ]]; then exit 23; fi
         self.assertFalse((self.root / 'results').exists())
 
     def test_eight_explicit_commands_use_real_configs_and_distinct_workdirs(self):
-        source = (ROOT / 'scripts/run_doris_tableiv_26rgb_to_30rgb_hphy15k.sh').read_text()
+        source = (ROOT / self.launcher).read_text()
         commands = [shlex.split(line) for line in source.splitlines()
                     if line.startswith('python tools/train.py ')]
         self.assertEqual(len(commands), 8)
@@ -103,16 +106,21 @@ if [[ ${HPHY_TEST_FAIL:-} == 1 && $2 == *_phy_gate.py ]]; then exit 23; fi
         for command, suffix in zip(commands,
                 ('', '_phy_gate', '_struct_gate', '_phy_struct_gate', '_ps_proto', '_struct_edge',
                  '_pbcr', '_proto_struct_edge')):
-            config = 'configs/hrda/doris/goji26RGB2goji30RGB/doris_goji26RGB2goji30RGB_hrda_3vi' + suffix + '.py'
+            config = 'configs/hrda/doris/' + self.direction + '/doris_' + self.direction + '_hrda_3vi' + suffix + '.py'
             self.assertEqual(command[2], config)
             self.assertTrue((ROOT / config).is_file())
             directory = command[command.index('--work-dir') + 1]
             self.assertEqual(directory, '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/'
-                'goji26RGB2goji30RGB/goji26RGB2goji30RGB_hrda_3vi' + suffix)
+                + self.direction + '/' + self.direction + '_hrda_3vi' + suffix)
             directories.append(directory)
         self.assertEqual(len(set(directories)), 8)
         self.assertNotIn('prepare_run', source)
         self.assertNotIn('for ', source)
+
+
+class IRRGLauncherTests(LauncherTests):
+    direction = 'goji26IRRG2goji30RGB'
+    launcher = 'scripts/run_doris_tableiv_26irrg_to_30rgb_hphy15k.sh'
 
 
 if __name__ == '__main__':

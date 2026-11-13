@@ -17,8 +17,9 @@ uda['struct_edge_cfg'].update(
     edge_fusion_mode='doris_reliable', pair_response_mode='valid_boundary_only',
     confidence_floor=0.60, confidence_range=0.35,
     prob_edge_weight=0.45, img_edge_weight=0.35, pair_edge_weight=0.20,
-    loss_weight_src=0.004, loss_weight_tgt=0.002)
-# Retain the direction-specific legacy pair gate parameter (unused by the new mode).
+    loss_weight_src=0.01, loss_weight_tgt=0.006)
+
+# Historical field, bypassed by doris_reliable + valid_boundary_only.
 uda['struct_edge_cfg']['boundary_pair_min_weight'] = 0.80
 
 # Match Full's basic logging; module-specific losses are retained.
@@ -37,7 +38,7 @@ uda.update(
     fixed_probe_interval=500, fixed_probe_max_samples=1, fixed_probe_index=0,
     mechanism_save_raw=True, mechanism_make_figures=True)
 
-work_dir = '/root/shared-nvme/work_dirs/doris_stage1/goji26IRRG2goji30RGB/goji26IRRG2goji30RGB_hrda_3vi_struct_edge'
+work_dir = '/root/shared-nvme/work_dirs/doris_struct_distinct_v2/goji26IRRG2goji30RGB/goji26IRRG2goji30RGB_hrda_3vi_struct_edge'
 name = 'doris_goji26IRRG2goji30RGB_hrda_3vi_struct_edge'
 exp = 'doris_stage1_ablation'
 name_uda = 'doris_edge'

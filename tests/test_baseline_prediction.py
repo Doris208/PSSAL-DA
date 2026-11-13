@@ -91,7 +91,8 @@ class BaselinePredictionTests(unittest.TestCase):
         for script in ('replay_baseline_prediction.py', 'build_branch_prediction_comparison.py'):
             result = subprocess.run([sys.executable, str(ROOT/'tools'/script), '--help'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-        with patch.object(baseline, 'replay', return_value=Path('/synthetic/output')) as run:
+        mmcv = SimpleNamespace(Config=SimpleNamespace(fromfile=lambda _: attributes(cfg)))
+        with patch.object(baseline, 'replay', return_value=Path('/synthetic/output')) as run, patch.dict(sys.modules, {'mmcv': mmcv}):
             baseline.main(['--config', 'a.py', '--checkpoint', 'b.pth', '--out-dir', 'result',
                            '--device', 'cpu', '--target-file', 'one.tif', 'two.tif'])
             self.assertEqual(run.call_args.kwargs['target_files'], [Path('one.tif'), Path('two.tif')])
@@ -148,7 +149,8 @@ class BaselinePredictionTests(unittest.TestCase):
             mechanism.student_test_metadata = Mock(return_value=fixture()[1]['student_inference'])
             shared = ModuleType('tools.replay_hphy_mechanism')
             shared.TARGET_FILES = targets
-            shared.verify_protocol = Mock()
+            shared.verify_protocol = Mock(return_value='goji26RGB2goji30RGB')
+            shared.RGB30_DIRECTIONS = ('goji26RGB2goji30RGB', 'goji26IRRG2goji30RGB')
             shared.sample_config = Mock(return_value=dict(margins=[30]*4))
             shared.load_model = Mock(return_value=(object(), info))
             shared.infer_model = Mock(return_value=(dict(baseline_prediction=arrays['baseline_prediction']), 'state'))
@@ -174,8 +176,8 @@ class BaselinePredictionTests(unittest.TestCase):
                 with self.assertRaises(FileExistsError):
                     baseline.replay(baseline.CONFIG, checkpoint, root/'run6', 'cpu', targets)
                 shared.load_model.return_value = (object(), dict(info, completed_iter=12000))
-                with self.assertRaisesRegex(ValueError, 'Iter 4000'):
-                    baseline.replay(baseline.CONFIG, checkpoint, root/'wrong_iter', 'cpu', targets[:1])
+                out = baseline.replay(baseline.CONFIG, checkpoint, root/'iter12000', 'cpu', targets[:1], dpi=30)
+                self.assertEqual(json.loads((out/'baseline_run_summary.json').read_text())['checkpoint_iter'], 12000)
 
 
 class ComparisonTests(unittest.TestCase):

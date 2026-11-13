@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.build_hphy_mechanism_figure import (
     CROP, GOJI, PALETTE, colored_pixels, file_sha256, plt, save_figure, synthetic_label)
+from tools.doris_probe_data import RGB30_DIRECTIONS
 
 ROLES = ('baseline', 'phy', 'struct')
 FIELDS = ('baseline_prediction', 'hphy_prediction', 'struct_prediction')
@@ -26,6 +27,8 @@ def load_artifact(path, role):
     if metadata_path is None:
         raise ValueError('Missing original replay metadata beside '+str(path))
     meta = json.loads(metadata_path.read_text(encoding='utf-8'))
+    if meta.get('direction') not in RGB30_DIRECTIONS:
+        raise ValueError('Unsupported comparison direction')
     if meta.get('arrays_sha256', {}).get(path.name) != file_sha256(path):
         raise ValueError('NPZ hash differs from original replay provenance: '+str(path))
     with np.load(path, allow_pickle=False) as saved:
@@ -181,7 +184,11 @@ def render(baseline_npz, phy_npz, struct_npz, out_dir, gt_file=None, dpi=600):
     for role, prediction in zip(ROLES, predictions):
         pixels = colored_pixels({'prediction': prediction}, 'prediction', {})[30:226, 30:226]
         Image.fromarray(pixels).save(out/(role+'_student_color_196.png'), dpi=(dpi, dpi))
+    iterations = {role: meta['checkpoint_' + role]['completed_iter']
+                  for role, (_, meta, _) in zip(ROLES, artifacts)}
     metadata = dict(sample_id=artifacts[0][1]['sample_id'], crop=list(CROP),
+        direction=artifacts[0][1]['direction'], checkpoint_iterations=iterations,
+        matched_training_iterations=len(set(iterations.values())) == 1,
         source_data={role: dict(source, checkpoint=meta['checkpoint_'+role],
             student_inference=meta.get('student_inference'),
             inference_details_recorded='student_inference' in meta,

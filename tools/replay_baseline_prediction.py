@@ -1,4 +1,4 @@
-"""Export the Iter-4000 HRDA-3VI Baseline Student using the shared replay path."""
+"""Export a verified HRDA-3VI Baseline Student using the shared replay path."""
 import argparse
 from datetime import datetime
 import hashlib
@@ -59,7 +59,7 @@ def export_sample(arrays, metadata, output, dpi=600):
 
 
 def replay(config=CONFIG, checkpoint=CHECKPOINT, out_dir=None, device='cuda:0',
-           target_files=None, dpi=600):
+           target_files=None, dpi=600, iteration=None):
     """Load one Baseline, then reuse the paired replay's Student-only inference."""
     import torch
     from mmcv import Config
@@ -68,7 +68,7 @@ def replay(config=CONFIG, checkpoint=CHECKPOINT, out_dir=None, device='cuda:0',
 
     config, checkpoint = Path(config).resolve(), Path(checkpoint).resolve()
     cfg = Config.fromfile(str(config))
-    shared.verify_protocol(cfg, physiology=False)
+    direction = shared.verify_protocol(cfg, physiology=False)
     if cfg.model.type != 'HRDAEncoderDecoder' or cfg.model.decode_head.type != 'HRDAHead':
         raise ValueError('The independent Baseline must use the existing HRDA model and decoder')
     targets = [Path(path).resolve() for path in (shared.TARGET_FILES if target_files is None else target_files)]
@@ -79,8 +79,9 @@ def replay(config=CONFIG, checkpoint=CHECKPOINT, out_dir=None, device='cuda:0',
     device = torch.device(device)
     if device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA unavailable')
-    out = Path(out_dir) if out_dir is not None else OUTPUT_ROOT/(
-        'iter_4000_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+    root = OUTPUT_ROOT if direction == shared.RGB30_DIRECTIONS[0] else Path(cfg.work_dir).parent / 'baseline_mechanism'
+    out = Path(out_dir) if out_dir is not None else root/(
+        checkpoint.stem+'_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
     out = out.resolve()
     out.mkdir(parents=True, exist_ok=False)
     (out/'logs').mkdir()
@@ -90,12 +91,13 @@ def replay(config=CONFIG, checkpoint=CHECKPOINT, out_dir=None, device='cuda:0',
     try:
         config_hash = file_sha256(config)
         LOGGER.info('Loading Baseline Student from %s', checkpoint)
-        model, information = shared.load_model(cfg, checkpoint, physiology=False, device=device, work_dir=out)
-        if information['completed_iter'] != 4000:
-            raise ValueError('This Baseline export requires a verified Iter 4000 checkpoint')
+        model, information = shared.load_model(cfg, checkpoint, physiology=False, device=device,
+            work_dir=out, explicit_iter=iteration)
+        completed = information['completed_iter']
         information = {key: value for key, value in information.items()
                        if key not in ('physiology_precision', 'hphy_probability_dtype')}
         source_files = ('tools/replay_baseline_prediction.py', 'tools/replay_hphy_mechanism.py',
+            'tools/doris_probe_data.py',
             'tools/replay_doris_mechanisms.py', 'mmseg/utils/mechanism.py',
             'mmseg/models/uda/dacs.py', 'mmseg/models/uda/uda_decorator.py', 'mmseg/vi_utils.py',
             'mmseg/datasets/goji.py', 'mmseg/datasets/goji_meta.py',
@@ -110,7 +112,7 @@ def replay(config=CONFIG, checkpoint=CHECKPOINT, out_dir=None, device='cuda:0',
             vi_paths = {name: target.parents[2]/(name+suffix)/target.parent.name/target.name
                         for name in ('ndvi', 'ndre', 'cire')}
             hashes = {str(path): file_sha256(path) for path in [target, *vi_paths.values()]}
-            LOGGER.info('Predicting %s, Student Iter 4000', target.name)
+            LOGGER.info('Predicting %s, Student Iter %d', target.name, completed)
             sample, _ = load_probe_sample(probe, model)
             arrays, state_hash = shared.infer_model(model, sample, probe, physiology=False)
             image, vi, metas = sample
@@ -134,11 +136,11 @@ def replay(config=CONFIG, checkpoint=CHECKPOINT, out_dir=None, device='cuda:0',
                 arrays['vi_'+name] = vi[0, index].numpy().copy()
             inference = student_test_metadata(model, image, metas)
             inference['prediction_field'] = 'baseline_prediction'
-            metadata = dict(direction='goji26RGB2goji30RGB', sample_id=target.name,
+            metadata = dict(direction=direction, sample_id=target.name,
                 target_file=str(target), target_sha256=hashes[str(target)],
                 vi_files={name: dict(path=str(path), sha256=hashes[str(path)]) for name, path in vi_paths.items()},
                 checkpoint_baseline=dict(information, state_sha256_before=state_hash, state_sha256_after=state_hash,
-                    eval=True, inference_mode=True), checkpoint_iter=4000,
+                    eval=True, inference_mode=True), checkpoint_iter=completed,
                 config_baseline=dict(path=str(config), sha256=config_hash,
                     resolved_sha256=hashlib.sha256(cfg.pretty_text.encode()).hexdigest()),
                 git_commit=commit, source_sha256=source_hashes,
@@ -162,7 +164,7 @@ def replay(config=CONFIG, checkpoint=CHECKPOINT, out_dir=None, device='cuda:0',
         if file_sha256(config) != config_hash or file_sha256(checkpoint) != information['sha256']:
             raise RuntimeError('Configuration or checkpoint changed during replay')
         summary = dict(checkpoint=information, sample_count=len(rows), samples=rows,
-            prediction_network='Student', checkpoint_iter=4000, gt_loaded=False, tta=False,
+            direction=direction, prediction_network='Student', checkpoint_iter=completed, gt_loaded=False, tta=False,
             capture_mode='checkpoint_replay', git_commit=commit)
         (out/'baseline_run_summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
         LOGGER.info('Completed %d Baseline Student samples in %s', len(rows), out)
@@ -177,14 +179,31 @@ def replay(config=CONFIG, checkpoint=CHECKPOINT, out_dir=None, device='cuda:0',
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=CONFIG)
-    parser.add_argument('--checkpoint', type=Path, default=CHECKPOINT)
+    from tools.doris_probe_data import RGB30_DIRECTIONS, replay_direction
+    parser.add_argument('--direction', choices=RGB30_DIRECTIONS)
+    parser.add_argument('--config', type=Path)
+    parser.add_argument('--checkpoint', type=Path)
+    parser.add_argument('--iter', dest='iteration', type=int, help='Verified completed iteration if checkpoint records are ambiguous')
     parser.add_argument('--out-dir', type=Path)
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--target-file', type=Path, nargs='+', dest='target_files',
                         help='Defaults to the six TARGET_FILES in replay_hphy_mechanism.py')
     parser.add_argument('--dpi', type=int, default=600)
     args = parser.parse_args(argv)
+    from mmcv import Config
+    if args.config is None:
+        direction = args.direction or RGB30_DIRECTIONS[0]
+        args.config = CONFIG if args.direction is None else (
+            ROOT / 'configs/hrda/doris' / direction / ('doris_' + direction + '_hrda_3vi.py'))
+    cfg = Config.fromfile(str(args.config))
+    direction = replay_direction(cfg)
+    if args.direction is not None and args.direction != direction:
+        parser.error('--direction differs from the resolved configuration')
+    if args.checkpoint is None:
+        if direction != RGB30_DIRECTIONS[0]:
+            parser.error('Supply --checkpoint for the IRRG26 Baseline Student')
+        args.checkpoint = CHECKPOINT
+    del args.direction
     logging.basicConfig(level=logging.INFO, format='%(levelname)s %(message)s')
     print('Saved Baseline Student predictions in '+str(replay(**vars(args))))
 

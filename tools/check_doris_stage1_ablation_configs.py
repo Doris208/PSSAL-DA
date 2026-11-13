@@ -18,7 +18,7 @@ MODULES = ('phy', 'struct', 'proto', 'struct_edge')
 PROTOCOL = ('data', 'optimizer', 'optimizer_config', 'lr_config', 'runner',
             'checkpoint_config', 'evaluation', 'seed', 'fp16', 'crop_size',
             'source_img_norm_cfg', 'target_img_norm_cfg')
-STRUCT_V2_DIRECTION = 'goji26RGB2goji30RGB'
+STRUCT_V2_DIRECTIONS = ('goji26RGB2goji30RGB', 'goji26IRRG2goji30RGB')
 STRUCT_V2_OVERRIDES = dict(
     fusion_mode='struct_distinct_v1', adjacency_mode='cross_class_conditional_v1',
     semantic_score_mode='probability_margin_v1', confidence_weight=.15,
@@ -40,6 +40,19 @@ def audit(reader):
             name = 'doris_' + direction + '_hrda_3vi' + suffix
             relative = 'configs/hrda/doris/' + direction + '/' + name + '.py'
             cfg = reader(str(ROOT / relative))
+            if direction in STRUCT_V2_DIRECTIONS:
+                reference_name = name.replace(direction, STRUCT_V2_DIRECTIONS[0])
+                reference = reader(str(ROOT / 'configs/hrda/doris' / STRUCT_V2_DIRECTIONS[0] /
+                                       (reference_name + '.py')))
+                for module, enabled in zip(MODULES, flags):
+                    if enabled:
+                        current_params = dict(cfg.uda[module + '_cfg'])
+                        reference_params = dict(reference.uda[module + '_cfg'])
+                        if module == 'struct_edge':
+                            # This field belongs only to the bypassed legacy pair gate.
+                            current_params.pop('boundary_pair_min_weight', None)
+                            reference_params.pop('boundary_pair_min_weight', None)
+                        assert current_params == reference_params, (name, 'RGB parameter parity', module)
             actual = tuple(cfg.uda.get(module + '_cfg', {}).get('enable', False)
                            for module in MODULES)
             assert actual == flags, (name, actual, flags)
@@ -57,7 +70,7 @@ def audit(reader):
             for module, enabled in zip(MODULES, flags):
                 if enabled:
                     expected = deepcopy(full.uda[module + '_cfg'])
-                    if direction == STRUCT_V2_DIRECTION and module == 'struct':
+                    if direction in STRUCT_V2_DIRECTIONS and module == 'struct':
                         expected.update(STRUCT_V2_OVERRIDES)
                     assert cfg.uda[module + '_cfg'] == expected, (name, module)
             # Non-module training options must match too. Observation/channel
@@ -84,6 +97,16 @@ def audit(reader):
                 assert cfg.uda.mechanism_online_plot and cfg.uda.mechanism_strict
                 assert cfg.uda.mechanism_summary_interval == cfg.uda.fixed_probe_interval == 500
                 assert cfg.uda.mechanism_save_raw
+                assert cfg.uda.mechanism_sample_interval == 100 and cfg.uda.mechanism_make_figures
+                if direction in STRUCT_V2_DIRECTIONS:
+                    expected_samples = 6 if flags[0] else 1
+                    assert cfg.uda.fixed_probe_max_samples == expected_samples, name
+                    filenames = cfg.uda.get('fixed_probe_filenames', [])
+                    assert len(filenames) == (6 if flags[0] else 0), name
+                    if filenames:
+                        first = ('3_1536_640_1792_896.tif' if 'IRRG' in direction
+                                 else '3_1024_1280_1280_1536.tif')
+                        assert filenames[0] == first, name
             else:
                 assert not cfg.uda.get('mechanism_online_plot', False)
             assert cfg.uda.get('physiology_collection', False) == flags[0], name
@@ -98,14 +121,14 @@ def audit(reader):
                         phy.phy_gate_full_iter) == ('early_nonzero_linear', .10, 4000)
             if flags[1]:
                 assert cfg.uda.struct_cfg.fusion_mode == (
-                    'struct_distinct_v1' if direction == STRUCT_V2_DIRECTION else 'doris_confidence_guided')
+                    'struct_distinct_v1' if direction in STRUCT_V2_DIRECTIONS else 'doris_confidence_guided')
             if flags[2]:
                 assert cfg.uda.proto_cfg.tau_proto == 0.25
                 assert cfg.uda.proto_cfg.tau_conf_proto == 0.88
             if flags[3]:
                 assert cfg.uda.struct_edge_cfg.edge_fusion_mode == 'doris_reliable'
                 assert cfg.uda.struct_edge_cfg.pair_response_mode == 'valid_boundary_only'
-            if direction == STRUCT_V2_DIRECTION:
+            if direction in STRUCT_V2_DIRECTIONS:
                 assert cfg.work_dir == STRUCT_V2_WORK_ROOT + direction + '/' + name[6:], name
             elif flags[0]:
                 assert cfg.work_dir == ('/root/shared-nvme/work_dirs/doris_hphy_early4k/' +
@@ -116,10 +139,17 @@ def audit(reader):
             outputs.add(cfg.work_dir)
             experiment = name[6:]
             commands.append(['python', 'tools/train.py', relative, '--work-dir',
-                             STRUCT_V2_WORK_ROOT + direction + '/' + experiment if direction == STRUCT_V2_DIRECTION else
+                             STRUCT_V2_WORK_ROOT + direction + '/' + experiment if direction in STRUCT_V2_DIRECTIONS else
                              '/root/shared-nvme/work_dirs/doris_stage1/' + direction + '/' + experiment])
             rows.append((name, flags))
-    # Preserve the archival launcher identity. Fresh 4K experiments use scripts/run_doris_tableiv_*.
+    for direction in STRUCT_V2_DIRECTIONS:
+        launcher_name = ('run_doris_tableiv_26irrg_to_30rgb_hphy15k.sh' if 'IRRG' in direction
+                         else 'run_doris_tableiv_26rgb_to_30rgb_hphy15k.sh')
+        launcher = ROOT / 'scripts' / launcher_name
+        launched = [shlex.split(line) for line in launcher.read_text(encoding='utf-8').splitlines()
+                    if line.startswith('python ')]
+        assert launched == [command for command in commands if '/' + direction + '/' in command[2]], launcher
+    # Preserve all 24 standalone commands and the third direction's archival paths.
     script = (ROOT / 'train_doris_mitb5_stage1_ablations_20k.sh').read_text(encoding='utf-8').encode('utf-8')
     for launcher in (ROOT / 'scripts').glob('*.sh'):
         assert b'\r' not in launcher.read_bytes(), (launcher, 'Active launchers require LF line endings')
@@ -142,7 +172,7 @@ def main():
     for name, flags in rows:
         print('{}: PASS phy/struct/proto/edge={}'.format(name, flags))
     print('PASS: 24 DORIS configurations and 24 commands; active module parameters '
-          'and training protocols checked, including RGB26-to-RGB30 Structural V2 consistency.')
+          'and training protocols checked, including both 26-to-RGB30 Structural V2 directions.')
 
 
 if __name__ == '__main__':

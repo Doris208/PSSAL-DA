@@ -20,6 +20,7 @@ from tools.build_hphy_mechanism_figure import (CROP, PALETTE, crop_arrays,
     file_sha256, output_path, roi_coordinates, validate_arrays, render, export_online_views)
 from tools.replay_doris_mechanisms import (checkpoint_state,
                                          inference_signature, state_digest)
+from tools.doris_probe_data import RGB30_DIRECTIONS, replay_direction
 
 LOGGER = logging.getLogger('hphy_offline')
 
@@ -43,6 +44,8 @@ OUTPUT_ROOT = Path('/root/shared-nvme/work_dirs/doris_hphy_early4k/goji26RGB2goj
 
 
 def verify_protocol(config, physiology, structural=False):
+    from tools.doris_probe_data import replay_direction
+    direction = replay_direction(config)
     flags = tuple(bool(config.uda.get(key, {}).get('enable', False)) for key in
                   ('phy_cfg', 'struct_cfg', 'proto_cfg', 'struct_edge_cfg'))
     if flags != (physiology, structural, False, False) or config.uda.get('joint_gate_cfg', {}).get('enable', False):
@@ -57,15 +60,14 @@ def verify_protocol(config, physiology, structural=False):
     if physiology and (config.uda.phy_cfg.get('mode') != 'hierarchical_gv' or
                        not config.uda.phy_cfg.get('use_target_gate', True)):
         raise ValueError('The physiology checkpoint must use the enabled hierarchical H-Phy gate')
-    for domain, expected_root in (('source', '26'), ('target', '30')):
+    for domain in ('source', 'target'):
         data = config.data.train[domain]
-        if Path(data.data_root).name != expected_root or Path(data.img_dir).parts[0] != 'rgb_dir':
-            raise ValueError('Expected source RGB26 and target RGB30 dataset identity')
         if (list(data.vi_names) != ['ndvi', 'ndre', 'cire'] or not data.use_vi or
                 not data.use_indices or not data.vi_as_input or data.vi_norm_for_input):
             raise ValueError('Missing or incompatible six-channel/independent VI input protocol')
     if config.uda.get('class_names') != ['goji', 'vegetation', 'building', 'water', 'road']:
         raise ValueError('Class order differs from the existing Goji mapping')
+    return direction
 
 
 def resolve_iteration(path, meta, explicit_iter=None):
@@ -149,6 +151,8 @@ def load_model(config, checkpoint_path, physiology, device, work_dir, explicit_i
     meta = checkpoint.get('meta', {})
     if not meta.get('config'):
         raise ValueError('Checkpoint lacks its saved training configuration')
+    if meta.get('iter') is None and meta.get('doris_checkpoint', {}).get('completed_iter') is None:
+        raise ValueError('Checkpoint lacks iteration metadata to verify the completed step')
     historical = Config.fromstring(meta['config'], '.py')
     verify_protocol(historical, physiology, structural)
     runtime = deepcopy(config)
@@ -201,9 +205,10 @@ def load_model(config, checkpoint_path, physiology, device, work_dir, explicit_i
 
 def sample_config(config, target_file):
     from mmseg.utils.mechanism import deterministic_probe_config
+    from tools.doris_probe_data import replay_direction
     probe = deterministic_probe_config(config)
-    if probe.get('direction') != 'goji26RGB2goji30RGB':
-        raise ValueError('Config does not resolve the Table IV RGB26 to RGB30 direction')
+    if probe.get('direction') != replay_direction(config):
+        raise ValueError('Config does not resolve its supported 26-to-RGB30 direction')
     target_file = Path(target_file).resolve()
     if target_file.parent.parent.name != 'rgb_dir' or target_file.suffix.lower() != '.tif':
         raise ValueError('Target must be an RGB TIFF inside DATA_ROOT/rgb_dir/SPLIT/')
@@ -258,7 +263,7 @@ def replay(config_phy, checkpoint_phy, config_baseline, checkpoint_baseline, tar
            out_dir, device='cuda:0', gt_file=None, selection_phy=None, selection_baseline=None, roi=None,
            iteration=None, iter_baseline=None):
     from mmcv import Config
-    from mmseg.utils.mechanism import load_probe_sample, hphy_gate_metadata
+    from mmseg.utils.mechanism import load_probe_sample, hphy_gate_metadata, student_test_metadata
     from mmseg.models.uda.phy_reliability import phy_gate_strength
 
     roi_coordinates(roi)
@@ -266,7 +271,7 @@ def replay(config_phy, checkpoint_phy, config_baseline, checkpoint_baseline, tar
     if device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA unavailable; use --device cpu for a local CPU replay')
     cfg_phy, cfg_base = Config.fromfile(str(config_phy)), Config.fromfile(str(config_baseline))
-    verify_protocol(cfg_phy, True)
+    direction = verify_protocol(cfg_phy, True)
     verify_protocol(cfg_base, False)
     if data_protocol(cfg_phy) != data_protocol(cfg_base):
         raise ValueError('Baseline and H-Phy training protocol differs in data')
@@ -307,6 +312,8 @@ def replay(config_phy, checkpoint_phy, config_baseline, checkpoint_baseline, tar
             infos.append(information)
             arrays.update(result)
             if physiology:
+                information['student_inference'] = student_test_metadata(model, sample[0], sample[2])
+                information['student_inference']['prediction_field'] = 'hphy_prediction'
                 image, vi, metas = sample
                 norm = metas[0]['img_norm_cfg']
                 original = image[0].numpy().transpose(1, 2, 0) * np.asarray(norm['std']) + np.asarray(norm['mean'])
@@ -359,7 +366,7 @@ def replay(config_phy, checkpoint_phy, config_baseline, checkpoint_baseline, tar
             'mmseg/models/segmentors/hrda_encoder_decoder.py', 'mmseg/models/decode_heads/hrda_head.py',
             'tools/replay_doris_mechanisms.py', 'tools/build_hphy_mechanism_figure.py',
             'tools/build_doris_mechanism_figures.py', 'tools/doris_probe_data.py']
-        meta = dict(direction='goji26RGB2goji30RGB', sample_id=target_file.name,
+        meta = dict(direction=direction, sample_id=target_file.name,
             target_file=str(target_file), target_sha256=input_hashes[str(target_file)],
             vi_files={key: dict(path=str(path), sha256=input_hashes[str(path)]) for key, path in index_paths.items()},
             gt=gt_info, checkpoint_phy=infos[0], checkpoint_baseline=infos[1],
@@ -368,6 +375,8 @@ def replay(config_phy, checkpoint_phy, config_baseline, checkpoint_baseline, tar
             config_baseline=dict(path=str(Path(config_baseline).resolve()), sha256=input_hashes[str(Path(config_baseline).resolve())],
                                  resolved_sha256=hashlib.sha256(cfg_base.pretty_text.encode()).hexdigest()),
             teacher_network='H-Phy EMA Teacher', prediction_network='Student',
+            capture_mode='checkpoint_replay', prediction_mode='test',
+            student_inference=infos[0]['student_inference'],
             comparison='independently selected models; checkpoint iterations may differ',
             input_channel_order=['R', 'G', 'B', 'NDVI', 'NDRE', 'CIRE'],
             image_6ch_definition='Normalized segmentation input in HWC order',
@@ -410,10 +419,48 @@ def replay(config_phy, checkpoint_phy, config_baseline, checkpoint_baseline, tar
         handler.close()
 
 
+def resolve_cli_inputs(args, branch, default_work_dir, default_output_root,
+                       baseline_default=None, baseline_work_dir=None):
+    """Select paired configs and relative checkpoint roots for the actual direction."""
+    from mmcv import Config
+    key = 'config_' + branch
+    if args[key] is None:
+        direction = args.get('direction') or RGB30_DIRECTIONS[0]
+        args[key] = ROOT / 'configs/hrda/doris' / direction / (
+            'doris_' + direction + '_hrda_3vi_' + branch + '_gate.py')
+    config = Config.fromfile(str(args[key]))
+    direction = replay_direction(config)
+    requested = args.pop('direction', None)
+    if requested is not None and requested != direction:
+        raise ValueError('--direction differs from the resolved configuration')
+    if args['config_baseline'] is None:
+        args['config_baseline'] = (baseline_default or CONFIG_BASELINE) if direction == RGB30_DIRECTIONS[0] else (
+            ROOT / 'configs/hrda/doris' / direction / ('doris_' + direction + '_hrda_3vi.py'))
+    baseline = Config.fromfile(str(args['config_baseline']))
+    if replay_direction(baseline) != direction:
+        raise ValueError('Baseline and branch checkpoints must belong to the same direction')
+    legacy = direction == RGB30_DIRECTIONS[0]
+    args['checkpoint_' + branch] = (default_work_dir if legacy else Path(config.work_dir)) / args['checkpoint_' + branch]
+    args['checkpoint_baseline'] = ((baseline_work_dir or BASELINE_WORK_DIR) if legacy else
+                                  Path(baseline.work_dir)) / args['checkpoint_baseline']
+    if args['target_file'] is None:
+        filenames = [path.name for path in TARGET_FILES]
+        if not legacy:
+            filenames = filenames[-1:] + filenames[:-1]
+        validation = config.data.val
+        args['target_file'] = TARGET_FILES if legacy else [
+            Path(validation.data_root) / validation.img_dir / name for name in filenames]
+    if args['out_dir'] is None:
+        root = default_output_root if legacy else Path(config.work_dir).parent / (branch + '_mechanism')
+        args['out_dir'] = root / '{}_{}'.format(args['checkpoint_' + branch].stem,
+            datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config-phy', type=Path, default=CONFIG_PHY)
-    parser.add_argument('--config-baseline', type=Path, default=CONFIG_BASELINE)
+    parser.add_argument('--direction', choices=RGB30_DIRECTIONS)
+    parser.add_argument('--config-phy', type=Path)
+    parser.add_argument('--config-baseline', type=Path)
     parser.add_argument('--checkpoint', '--checkpoint-phy', dest='checkpoint_phy',
                         type=Path, default=CHECKPOINT_PHY,
                         help='H-Phy checkpoint, absolute or relative to PHY_WORK_DIR')
@@ -421,7 +468,7 @@ def main(argv=None):
                         help='Baseline checkpoint, absolute or relative to BASELINE_WORK_DIR')
     for role in ('phy', 'baseline'):
         parser.add_argument('--selection-' + role)
-    parser.add_argument('--target-file', type=Path, nargs='+', default=TARGET_FILES,
+    parser.add_argument('--target-file', type=Path, nargs='+',
                         help='One or more target TIFFs, processed independently with batch size one')
     parser.add_argument('--gt-file')
     parser.add_argument('--out-dir', type=Path)
@@ -435,16 +482,14 @@ def main(argv=None):
     dpi, font_size = args.pop('dpi'), args.pop('font_size')
     if dpi <= 0 or font_size <= 0:
         parser.error('--dpi and --font-size must be positive')
+    if args['config_phy'] is None and args['direction'] is None:
+        args['config_phy'] = CONFIG_PHY
+    resolve_cli_inputs(args, 'phy', PHY_WORK_DIR, OUTPUT_ROOT)
     target_files = args.pop('target_file')
     if len({path.stem for path in target_files}) != len(target_files):
         parser.error('Target image basenames must be unique')
     if len(target_files) > 1 and args['gt_file'] is not None:
         parser.error('--gt-file requires a single --target-file for aligned reference statistics')
-    args['checkpoint_phy'] = PHY_WORK_DIR / args['checkpoint_phy']
-    args['checkpoint_baseline'] = BASELINE_WORK_DIR / args['checkpoint_baseline']
-    if args['out_dir'] is None:
-        args['out_dir'] = OUTPUT_ROOT / '{}_{}'.format(
-            args['checkpoint_phy'].stem, datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
     run_dir = output_path(args['out_dir'])
     if len(target_files) > 1:
         run_dir.mkdir(parents=True, exist_ok=False)

@@ -180,7 +180,7 @@ def probe_arrays(model, image, vi, metas, spatial_valid):
             proto_weight, _ = model.proto_gate.compute_weight(
                 features, label, out_size=label.shape[-2:], iter=model.local_iter, read_only=True)
             final = weight * proto_weight.detach()
-            maps.update(w_t_proto=final, delta_w_proto=final - weight)
+            maps.update(proto_weight=proto_weight, w_t_proto=final, delta_w_proto=final - weight)
         else:
             final = weight
         maps['w_final'] = final
@@ -529,8 +529,36 @@ def branch_probe_payload(model, image, vi, metas, valid, metadata, unavailable_w
     kept = ('valid_mask','pseudo_label','w_conf','rule_iter','proto_active',
             'r_phy','m_phy','delta_w_phy','r_conf','r_loc','r_adj','r_prob','r_struct',
             'adjacency_available','semantic_available','w_before_struct','w_after_struct',
-            'delta_w_proto','teacher_pseudo_boundary','r_edge','edge_supervision')
+            'delta_w_proto','proto_weight','teacher_pseudo_boundary','r_edge','edge_supervision',
+            'w_base','w_t_phy','w_t_ps','w_pre_proto','w_t_proto','w_final',
+            'e_prob','e_img','r_pair','boundary_weight',
+            'confidence_available','continuity_available','evidence_count',
+            'target_cross_neighbor_count','source_cross_prior_available')
     payload = {key:maps[key] for key in kept if key in maps}
+    if 'r_struct' in maps:
+        metadata['struct_cfg'] = dict(model.struct_cfg, eps=model.struct_gate.eps)
+        metadata['struct_gate_strength'] = model.struct_gate.gate_strength(model.local_iter)
+        metadata['struct_feature_strength'] = model.struct_gate.feature_strength(
+            model.local_iter, model.struct_cfg.get('feature_interaction_warmup_iters', model.struct_gate.struct_warmup_iters),
+            model.struct_cfg.get('feature_interaction_rampup_iters', model.struct_gate.struct_rampup_iters))
+        metadata['feature_interaction_evaluated'] = False
+        metadata['struct_class_distribution'] = {
+            str(cls): int((maps['valid_mask'] & (maps['pseudo_label'] == cls)).sum())
+            for cls in model.struct_gate.struct_positive_classes}
+        metadata['struct_probability_dtype'] = 'float16' if image.is_cuda else 'float32'
+    if 'proto_weight' in maps:
+        gate = model.proto_gate
+        metadata.setdefault('prototype', {}).update(
+            valid_class_ids=gate.valid_proto.nonzero().flatten().tolist(),
+            source_valid_class_ids=gate.source_valid_proto.nonzero().flatten().tolist(),
+            target_valid_class_ids=gate.target_valid_proto.nonzero().flatten().tolist(),
+            target_update_active=bool(gate.target_update and model.local_iter >= gate.target_update_start),
+            weight_start=gate.weight_start, loss_start=gate.loss_start,
+            target_update_start=gate.target_update_start, update_executed=False)
+    if 'r_edge' in maps:
+        metadata['edge_pair_prior_ready'] = bool(model.struct_edge_pair_prior_ready)
+        metadata['edge_supervision_max'] = float(model.struct_edge_loss_weight_tgt)
+        metadata['edge_cfg'] = dict(model.struct_edge_cfg)
     if 'r_phy' in maps:
         metadata['head_version'] = getattr(model, 'phy_mode', 'legacy_binary')
     if 'r_veg' in maps:

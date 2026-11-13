@@ -154,7 +154,9 @@ class DorisCoreTests(unittest.TestCase):
             data['gt_semantic_seg'][:, :, :, 16:] = 1
             data['valid_pseudo_mask'][:, :, :3] = 0
             optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-            output = model.train_step(data, optimizer)
+            production_schedule = SimpleNamespace(phy_gate_strength=scope.get('phy_gate_strength'))
+            with patch.dict('sys.modules', {'mmseg.models.uda.phy_reliability': production_schedule}):
+                output = model.train_step(data, optimizer)
             self.assertTrue(all(torch.isfinite(torch.tensor(value))
                                 for value in output['log_vars'].values()))
             self.assertTrue(all(torch.isfinite(p).all() for p in model.parameters()))
@@ -536,7 +538,7 @@ class DorisConfigTests(unittest.TestCase):
         rows = audit_configs(helpers.static_config)
         self.assertEqual(len(rows), 30)
         parameters = ((3000, 6000, .0003, .95, .35, .006, .003),
-                      (4000, 8000, .0002, .98, .35, .004, .002),
+                      (3000, 6000, .001, .88, .70, .010, .006),
                       (3000, 6000, .001, .88, .70, .010, .006))
         for direction, values in zip(DIRECTIONS, parameters):
             stem = direction + '_hrda_3vi'
@@ -544,6 +546,11 @@ class DorisConfigTests(unittest.TestCase):
             baseline = helpers.static_config('configs/hrda/doris/' + direction + '/doris_' + stem + '.py')
             for flag in ('mechanism_logging', 'fixed_probe_enabled'):
                 self.assertFalse(baseline['uda'].pop(flag))
+            if direction == 'goji26IRRG2goji30RGB':
+                self.assertEqual(baseline['uda'].pop('source_input_channel_order'),
+                                 ['NIR', 'R', 'G', 'NDVI', 'NDRE', 'CIRE'])
+                self.assertEqual(baseline['uda'].pop('target_input_channel_order'),
+                                 ['R', 'G', 'B', 'NDVI', 'NDRE', 'CIRE'])
             for key in ('model', 'uda', 'data', 'optimizer', 'optimizer_config', 'lr_config',
                         'checkpoint_config', 'evaluation', 'fp16', 'seed', 'crop_size'):
                 self.assertEqual(old[key], baseline[key], (direction, key))
