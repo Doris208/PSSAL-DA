@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from tools.check_doris_stage1_configs import VARIANTS
+from tools.doris_checkpoint_plan import configure_checkpoint_policy
 
 
 DIRECTIONS = ('goji26RGB2goji30RGB', 'goji26IRRG2goji30RGB',
@@ -40,6 +41,16 @@ def audit(reader):
             name = 'doris_' + direction + '_hrda_3vi' + suffix
             relative = 'configs/hrda/doris/' + direction + '/' + name + '.py'
             cfg = reader(str(ROOT / relative))
+            effective = deepcopy(cfg)
+            assert configure_checkpoint_policy(effective), name
+            assert effective.checkpoint_config == dict(type='DorisCheckpointHook', by_epoch=False,
+                interval=2000, max_keep_ckpts=-1, save_optimizer=True, save_last=False,
+                keep_iterations=[2000, 4000, 6000]), name
+            assert effective['evaluation']['doris_best_only'] and effective['evaluation']['save_best'] == 'mIoU', name
+            assert effective['evaluation']['save_best_goji'] is False, name
+            assert effective['evaluation']['interval'] == cfg.evaluation.interval == 1000, name
+            for key in ('model', 'uda', 'data', 'optimizer', 'lr_config', 'runner'):
+                assert effective[key] == cfg[key], (name, 'checkpoint policy changed training', key)
             if direction in STRUCT_V2_DIRECTIONS:
                 reference_name = name.replace(direction, STRUCT_V2_DIRECTIONS[0])
                 reference = reader(str(ROOT / 'configs/hrda/doris' / STRUCT_V2_DIRECTIONS[0] /
@@ -173,6 +184,8 @@ def main():
         print('{}: PASS phy/struct/proto/edge={}'.format(name, flags))
     print('PASS: 24 DORIS configurations and 24 commands; active module parameters '
           'and training protocols checked, including both 26-to-RGB30 Structural V2 directions.')
+    print('Checkpoint policy in all 24 configurations: four Best models, rolling latest '
+          'every 2000 Iter, fixed resumable Iter 2000/4000/6000; validation every 1000 Iter.')
 
 
 if __name__ == '__main__':

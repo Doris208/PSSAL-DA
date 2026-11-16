@@ -1,7 +1,10 @@
-"""Pure configuration planning for DORIS historical checkpoints (no training)."""
+"""DORIS checkpoint policy and historical boundary analysis (no training)."""
 from copy import deepcopy
 from pathlib import Path
 import re
+
+
+FIXED_CHECKPOINT_ITERS = (2000, 4000, 6000)
 
 
 def applies(config):
@@ -80,13 +83,11 @@ def configure_checkpoint_policy(config):
     """Unified opt-in by the existing DORIS experiment names; other jobs unchanged."""
     if not applies(config):
         return False
-    plan = checkpoint_plan(config)
-    checkpoint = deepcopy(dict(config.get('checkpoint_config', {})))
-    checkpoint.update(type='DorisCheckpointHook', by_epoch=False, interval=2000,
-        max_keep_ckpts=-1, save_optimizer=True, save_last=True, key_iterations=plan['extra'])
-    config['checkpoint_config'] = checkpoint
+    config['checkpoint_config'] = dict(type='DorisCheckpointHook', by_epoch=False,
+        interval=2000, max_keep_ckpts=-1, save_optimizer=True, save_last=False,
+        keep_iterations=list(FIXED_CHECKPOINT_ITERS))
     evaluation = deepcopy(dict(config['evaluation']))
-    evaluation['save_best_goji'] = True
+    evaluation.update(save_best='mIoU', save_best_goji=False, doris_best_only=True)
     config['evaluation'] = evaluation
     return True
 
@@ -96,6 +97,11 @@ def check_output_directory(config):
     if not applies(config):
         return
     directory = Path(config['work_dir'])
+    if directory.exists() and (list(directory.glob('*.pth')) or (directory / 'checkpoint_best.json').exists()):
+        marker = directory / '.doris_checkpoint_policy.json'
+        if not marker.is_file():
+            raise FileExistsError('Historical checkpoints use another saving policy; preserve this directory '
+                                  'and select a new --work-dir')
     if (directory / 'iter_{}.pth'.format(config['runner']['max_iters'])).exists():
         raise FileExistsError('Work directory already contains the final checkpoint; preserve the completed '
                               'experiment and use a new --work-dir: ' + str(directory))
@@ -129,6 +135,50 @@ def check_hphy_training_checkpoint(config):
                          'Requested {}, saved {}'.format(current_gate, saved_gate))
 
 
+def check_doris_resume_checkpoint(config, model=None):
+    """Validate full resume before files/model state can be changed."""
+    path = config.get('resume_from')
+    if not applies(config) or not path:
+        return None
+    import torch
+    from mmcv import Config
+    from tools.replay_doris_mechanisms import checkpoint_state, inference_signature
+    checkpoint = torch.load(path, map_location='cpu')
+    meta = checkpoint.get('meta', {})
+    saved_policy = meta.get('doris_checkpoint', {})
+    if not checkpoint.get('optimizer') or saved_policy.get('resumable') is False:
+        raise ValueError('Checkpoint has no complete optimizer/resume state. Use --load-from for '
+                         'Best weight initialization, or --resume-from PATH/latest.pth for continuation.')
+    if not meta.get('config'):
+        raise ValueError('Resume checkpoint lacks the training configuration')
+    saved = Config.fromstring(meta['config'], '.py')
+    if inference_signature(config) != inference_signature(saved):
+        raise ValueError('Resume model, input protocol or module configuration differs from checkpoint')
+    for key in ('optimizer', 'lr_config', 'runner', 'seed', 'fp16'):
+        if config.get(key) != saved.get(key):
+            raise ValueError('Resume training protocol differs in ' + key)
+    completed = saved_policy.get('completed_iter')
+    if completed is None:
+        match = re.fullmatch(r'(?:best_.+_)?iter_(\d+)\.pth', Path(path).resolve().name)
+        completed = int(match[1]) if match else None
+    if (type(completed) is not int or type(meta.get('iter')) is not int or
+            meta['iter'] not in (completed, completed-1) or not 0 < completed <= config['runner']['max_iters']):
+        raise ValueError('Resume checkpoint lacks consistent completed-iteration metadata')
+    meta = deepcopy(meta)
+    meta.setdefault('doris_checkpoint', {})['completed_iter'] = completed
+    if saved_policy.get('policy') == 'doris_four_best_latest_v1':
+        if saved_policy.get('local_iter', completed) != completed:
+            raise ValueError('Saved DACS local_iter disagrees with the completed iteration')
+        if meta.get('doris_resume', {}).get('max_iters') != config['runner']['max_iters']:
+            raise ValueError('Resume LR scheduling horizon differs from checkpoint')
+        if not meta.get('doris_resume', {}).get('rng_states'):
+            raise ValueError('Latest checkpoint lacks its saved RNG state')
+    if model is not None:
+        unwrapped = getattr(model, 'module', model)
+        unwrapped.load_state_dict(checkpoint_state(checkpoint), strict=True)
+    return meta
+
+
 def audit_configs(loader):
     root = Path(__file__).resolve().parents[1]
     records = []
@@ -141,7 +191,9 @@ def audit_configs(loader):
             modules={key:dict(config['uda'][key]) for key in
                      ('phy_cfg','struct_cfg','proto_cfg','struct_edge_cfg')},
             checkpoint=dict(config['checkpoint_config']), evaluation=dict(config['evaluation']),
-            plan=checkpoint_plan(config)))
+            fixed_checkpoint_iterations=list(FIXED_CHECKPOINT_ITERS),
+            plan_analysis_only=True, plan=checkpoint_plan(config),
+            latest_iterations=list(range(2000, config['runner']['max_iters'] + 1, 2000))))
     return records
 
 

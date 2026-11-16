@@ -131,7 +131,8 @@ def main(args):
         cfg.load_from = args.load_from
     if args.resume_from is not None:
         cfg.resume_from = args.resume_from
-    from tools.doris_checkpoint_plan import check_hphy_training_checkpoint
+    from tools.doris_checkpoint_plan import check_hphy_training_checkpoint, check_doris_resume_checkpoint
+    check_doris_resume_checkpoint(cfg)
     check_hphy_training_checkpoint(cfg)
     from tools.doris_checkpoint_plan import configure_checkpoint_policy, check_output_directory
     configure_checkpoint_policy(cfg)

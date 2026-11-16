@@ -57,13 +57,18 @@ def checkpoint_state(checkpoint):
 def checkpoint_iteration(path, meta):
     match = re.fullmatch(r'(?:best_.+_)?iter_(\d+)\.pth', Path(path).resolve().name)
     stored = meta.get('iter')
-    if not match:
+    saved = meta.get('doris_checkpoint', {})
+    rolling = saved.get('policy') == 'doris_four_best_latest_v1' and saved.get('kind') == 'latest'
+    if not match and not rolling:
         raise ValueError('Completed iteration is ambiguous; latest must resolve or match a numbered checkpoint')
-    completed = int(match[1])
+    completed = int(match[1]) if match else saved.get('completed_iter')
+    if type(completed) is not int or completed <= 0 or (
+            saved.get('completed_iter') is not None and saved['completed_iter'] != completed):
+        raise ValueError('Checkpoint completed-iteration metadata disagrees with its filename')
     if not isinstance(stored, int) or isinstance(stored, bool) or stored not in (completed, completed - 1):
         raise ValueError('Checkpoint filename and meta.iter disagree: {} versus {}'.format(completed, stored))
     return dict(completed_iter=completed, checkpoint_meta_iter=stored,
-                iteration_source='numbered_filename_verified_against_meta',
+                iteration_source='rolling_latest_completed_iter' if not match else 'numbered_filename_verified_against_meta',
                 mmcv_zero_based_counter_corrected=stored == completed - 1)
 
 

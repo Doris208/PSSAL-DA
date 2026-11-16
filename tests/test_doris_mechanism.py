@@ -141,7 +141,7 @@ class MechanismTests(unittest.TestCase):
         runner.load_checkpoint = lambda path: None
         cfg = Config(resume_from='iter_8500.pth', load_from=None, uda=dict(type='DACS'))
         exec(compile(ast.Module(body=[block], type_ignores=[]), 'resume_fixture', 'exec'),
-             dict(cfg=cfg, runner=runner))
+             dict(cfg=cfg, runner=runner, doris_checkpoints=False))
         self.assertEqual(model.local_iter, 8500)
 
     def test_resume_corrects_mmcv_checkpoint_counter_for_numbered_and_latest_paths(self):
@@ -168,7 +168,7 @@ class MechanismTests(unittest.TestCase):
                 path_api = SimpleNamespace(realpath=lambda p: '/work/iter_5000.pth',
                                            basename=lambda p: p.rsplit('/', 1)[-1])
                 exec(compile(ast.Module(body=[block], type_ignores=[]), 'resume_fixture', 'exec'),
-                     dict(cfg=cfg, runner=runner, osp=path_api, re=re,
+                     dict(cfg=cfg, runner=runner, osp=path_api, re=re, doris_checkpoints=False,
                           logger=SimpleNamespace(info=lambda *a: None)))
                 self.assertEqual(runner.iter, 5000)
                 self.assertEqual(runner.model.module.local_iter, 5000)

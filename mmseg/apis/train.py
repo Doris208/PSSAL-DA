@@ -50,7 +50,8 @@ def train_segmentor(model,
                     meta=None):
     """Launch segmentor training."""
     logger = get_root_logger(cfg.log_level)
-    from tools.doris_checkpoint_plan import configure_checkpoint_policy, check_hphy_training_checkpoint
+    from tools.doris_checkpoint_plan import (configure_checkpoint_policy, check_hphy_training_checkpoint,
+                                             check_doris_resume_checkpoint)
     check_hphy_training_checkpoint(cfg)
     doris_checkpoints = configure_checkpoint_policy(cfg)
 
@@ -113,6 +114,11 @@ def train_segmentor(model,
             work_dir=cfg.work_dir,
             logger=logger,
             meta=meta))
+    if doris_checkpoints:
+        runner.meta = runner.meta or {}
+        runner.meta['doris_checkpoint_context'] = dict(
+            experiment=cfg.name, direction=cfg.name_dataset.rsplit('_256x256_3vi', 1)[0], model=cfg.model.type,
+            validation={key: cfg.data.val.get(key) for key in ('data_root', 'img_dir', 'ann_dir', 'split')})
 
     optimizer_config = cfg.optimizer_config
     optimizer_config_kwargs = {} if optimizer_config is None \
@@ -129,7 +135,7 @@ def train_segmentor(model,
                                    None if doris_checkpoints else cfg.checkpoint_config, cfg.log_config,
                                    cfg.get('momentum_config', None))
     if doris_checkpoints:
-        # Save after validation so either Best record is included in latest.
+        # Save latest after validation so all Best records are included.
         runner.register_hook(build_from_cfg(cfg.checkpoint_config, HOOKS), priority='LOW')
     if cfg.get('custom_hooks', None):
         for hook_cfg in cfg.custom_hooks:
@@ -154,7 +160,19 @@ def train_segmentor(model,
 
     if cfg.resume_from:
         runner.resume_from = cfg.resume_from
+        resumed_meta = check_doris_resume_checkpoint(cfg, runner.model) if doris_checkpoints else None
         runner.resume(cfg.resume_from)
+        if resumed_meta is not None:
+            # IterBasedRunner.resume in MMCV 1.4 restores optimizer/counters,
+            # but does not assign checkpoint meta to the runner.
+            runner.meta = resumed_meta
+            runner.meta['config'] = cfg.pretty_text
+            if meta is not None and meta.get('git_commit'):
+                runner.meta['git_commit'] = meta['git_commit']
+            runner._iter = resumed_meta['doris_checkpoint']['completed_iter']
+            runner._inner_iter = runner.iter
+            if resumed_meta.get('doris_resume', {}).get('rng_states'):
+                runner._doris_resume_rng = resumed_meta['doris_resume']['rng_states']
         if cfg.get('uda', {}).get('type') == 'DACS':
             if cfg.get('runner', {}).get('type') == 'IterBasedRunner':
                 checkpoint_name = osp.basename(osp.realpath(cfg.resume_from))

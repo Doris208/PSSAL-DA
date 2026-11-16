@@ -11,11 +11,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
-from mmcv.runner import build_optimizer, save_checkpoint
+from mmcv.runner import build_optimizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.check_doris_hphy_configs import EXPERIMENTS, check_config, config_path
 from tools.doris_probe_data import RGB30_DIRECTIONS
+from tools.doris_checkpoint_plan import configure_checkpoint_policy
 
 
 def main():
@@ -37,6 +38,8 @@ def main():
     from mmseg.models.builder import build_train_model
     from mmseg.utils.mechanism import branch_probe_payload, model_digest, readonly_probe
     from mmseg.models.uda.phy_reliability import phy_gate_strength
+    from mmseg.utils.doris_checkpoint import save_bests, save_latest, METRICS
+    from mmcv.runner import IterBasedRunner
 
     torch.set_num_threads(2)
     report = dict(device=str(device), direction=args.direction, torch=torch.__version__, synthetic=True,
@@ -48,6 +51,7 @@ def main():
         name, suffix, flags = EXPERIMENTS[number - 1]
         print('{} constructing full HRDA/DACS model'.format(name), flush=True)
         cfg, audit = check_config(config_path(suffix, args.direction), flags)
+        configure_checkpoint_policy(cfg)
         cfg.model.pretrained = None
         cfg.model.backbone.pretrained = None
         cfg.model.train_cfg.work_dir = str(output)
@@ -160,23 +164,43 @@ def main():
                              phy_weight_identity=flags[0]))
         scope['get_class_masks'], scope['training_record'] = original_masks, original_record
         model.get_model().forward_train = original_forward
-        # Same-model checkpoint/optimizer restoration, including all branch banks.
+        with readonly_probe(model):
+            prediction = model.get_model().simple_test(image[:1], metas[:1], rescale=True)
+        if len(prediction) != 1 or prediction[0].shape != (256, 256):
+            raise AssertionError('Student validation output has the wrong shape')
+        from mmseg.datasets.goji import GojiDataset
+        validation = object.__new__(GojiDataset)
+        validation.ignore_index, validation.label_map, validation.reduce_zero_label = 255, {}, True
+        reduced = gt[0, 0].detach().cpu().numpy()
+        raw = np.where(reduced < 5, reduced + 1, 0).astype(np.uint8)
+        validation.get_gt_seg_maps = lambda efficient_test=False: [raw]
+        scores = validation.evaluate(prediction, logger=logging.getLogger('smoke'))
+        if not set(METRICS).issubset(scores):
+            raise AssertionError('Goji validation did not produce the four real metric fields')
+        # Real Runner writer, four-metric policy and optimizer restoration.
         with tempfile.TemporaryDirectory(prefix='checkpoint_', dir=str(output)) as temporary:
-            from mmseg.utils.checkpoint_policy import prepare_save
-            checkpoint_path = Path(temporary) / ('iter_{}.pth'.format(model.local_iter))
-            runner = SimpleNamespace(model=model, optimizer=optimizer, meta={}, iter=model.local_iter-1)
-            prepare_save(runner, checkpoint_path)
-            save_checkpoint(model, str(checkpoint_path), optimizer=optimizer,
-                            meta=dict(runner.meta, config=cfg.pretty_text, iter=model.local_iter,
-                                      head_version=getattr(model, 'phy_mode', 'disabled'),
-                                      phy_cfg=dict(model.phy_cfg), phy_gate=getattr(model, 'phy_gate_params', {})))
+            runner = IterBasedRunner(model, optimizer=optimizer, work_dir=temporary,
+                logger=logging.getLogger('smoke'), max_iters=15000,
+                meta=dict(config=cfg.pretty_text, synthetic_fixture=True))
+            runner._iter = model.local_iter - 1
+            best_report = save_bests(runner, scores)
+            save_latest(runner)
+            checkpoint_path = Path(temporary) / 'latest.pth'
+            fixed_names = {'iter_2000.pth', 'iter_4000.pth', 'iter_6000.pth'}
+            numbered = {path.name for path in Path(temporary).glob('iter_*.pth')}
+            if len(list(Path(temporary).glob('*.pth'))) > 8 or not numbered <= fixed_names:
+                raise AssertionError('Checkpoint count exceeded four Best, latest and three fixed states')
             before = model_digest(model)
             checkpoint = torch.load(str(checkpoint_path), map_location='cpu')
             model.load_state_dict(checkpoint['state_dict'], strict=True)
             optimizer.load_state_dict(checkpoint['optimizer'])
             if model_digest(model) != before:
                 raise AssertionError('Checkpoint roundtrip changed model state')
-            del checkpoint
+            checkpoint_policy = dict(best_metrics={key: scores[key] for key in METRICS},
+                checkpoint_count=len(list(Path(temporary).glob('*.pth'))),
+                best_storage={key: best_report[key]['storage'] for key in METRICS},
+                optimizer_in_latest='optimizer' in checkpoint, synthetic_validation=True)
+            del checkpoint, runner
         metadata = dict(iter=model.local_iter, sample_id=metas[0]['filename'],
                         config_sha256=name, synthetic_fixture=True, capture_mode='synthetic_smoke',
                         modules=dict(zip(('phy', 'struct', 'proto', 'edge'), flags)),
@@ -204,7 +228,7 @@ def main():
         report['experiments'].append(dict(audit, name=name, runs=runs,
             parameters=sum(p.numel() for p in model.parameters()),
             hphy_parameters=sum(p.numel() for p in model.phy_head.parameters()) if flags[0] else 0,
-            checkpoint_roundtrip=True, checkpoint_space_check=True,
+            checkpoint_roundtrip=True, checkpoint_space_check=True, checkpoint_policy=checkpoint_policy,
             student_validation=True, probe_export=True, fixed_probe_collector=args.check_fixed_probes and any(flags)))
         (output / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         print('{} PASS on {}'.format(name, device), flush=True)

@@ -41,7 +41,11 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(cfg['checkpoint_config']['interval'],2000)
             self.assertEqual(cfg['checkpoint_config']['max_keep_ckpts'],-1)
             self.assertTrue(cfg['checkpoint_config']['save_optimizer'])
-            self.assertTrue(cfg['evaluation'].pop('save_best_goji'))
+            self.assertFalse(cfg['evaluation'].pop('save_best_goji'))
+            self.assertTrue(cfg['evaluation'].pop('doris_best_only'))
+            self.assertFalse(cfg['checkpoint_config']['save_last'])
+            self.assertEqual(cfg['checkpoint_config']['keep_iterations'],[2000,4000,6000])
+            self.assertNotIn('key_iterations', cfg['checkpoint_config'])
             cfg.pop('checkpoint_config'); original.pop('checkpoint_config')
             self.assertEqual(cfg,original)
             directories.add(cfg['work_dir'])
@@ -123,6 +127,9 @@ class SavingTests(unittest.TestCase):
         cls.policy=load('policy_under_test','mmseg/utils/checkpoint_policy.py')
         cls.policy_import=patch.dict(sys.modules,{'mmseg.utils.checkpoint_policy':cls.policy})
         cls.policy_import.start();cls.addClassCleanup(cls.policy_import.stop)
+        cls.storage=load('mmseg.utils.doris_checkpoint','mmseg/utils/doris_checkpoint.py')
+        cls.storage_import=patch.dict(sys.modules,{'mmseg.utils.doris_checkpoint':cls.storage})
+        cls.storage_import.start();cls.addClassCleanup(cls.storage_import.stop)
         best=load('best_under_test','mmseg/core/evaluation/goji_best.py')
         scope.update(_EvalHook=scope['EvalHook'],_DistEvalHook=scope['DistEvalHook'],
                      GojiBestMixin=best.GojiBestMixin)
@@ -130,8 +137,9 @@ class SavingTests(unittest.TestCase):
         cls.Eval=scope['EvalHook'];cls.DistEval=scope['DistEvalHook']
 
         def save(model,filename,optimizer=None,meta=None):
-            torch.save(dict(state_dict=model.state_dict(),optimizer=optimizer.state_dict(),
-                            meta=copy.deepcopy(meta)),filename)
+            state=dict(state_dict=model.state_dict(),meta=copy.deepcopy(meta))
+            if optimizer is not None:state['optimizer']=optimizer.state_dict()
+            torch.save(state,filename)
         runner_scope=dict(osp=osp,platform=platform,shutil=shutil,save_checkpoint=save,
             mmcv=SimpleNamespace(symlink=Mock()))
         tree=ast.parse((MMCV/'runner/iter_based_runner.py').read_text())
@@ -150,14 +158,15 @@ class SavingTests(unittest.TestCase):
         runner.log_buffer=SimpleNamespace(output={},ready=False)
         return runner
 
-    def evaluation(self,runner,distributed=False):
+    def evaluation(self,runner,distributed=False,four=False):
         class Dataset(torch.utils.data.Dataset):
             CLASSES=('goji','vegetation','building','water','road')
             def __len__(self):return 1
             def __getitem__(self,index):return 0
             def evaluate(self,results,**kwargs):return results
         loader=torch.utils.data.DataLoader(Dataset())
-        options=dict(interval=1000,save_best='mIoU',save_best_goji=True,test_fn=lambda *a:None)
+        options=dict(interval=1000,save_best='mIoU',save_best_goji=not four,
+                     doris_best_only=four,test_fn=lambda *a:None)
         if distributed:options['broadcast_bn_buffer']=False
         hook=(self.DistEval if distributed else self.Eval)(loader,**options)
         hook.before_run(runner)
@@ -168,7 +177,7 @@ class SavingTests(unittest.TestCase):
         score=hook.evaluate(runner,dict(mIoU=miou,**{'IoU.goji':goji,'Veg.mIoU':1.0}))
         hook._save_ckpt(runner,score)
 
-    def test_union_keeps_every_node_and_latest_with_no_duplicate_writes(self):
+    def test_latest_rolls_and_keeps_only_three_fixed_iterations(self):
         cfg=static_config('configs/hrda/doris/goji26RGB2goji30RGB/'
             'doris_goji26RGB2goji30RGB_hrda_3vi_proto_struct_edge.py')
         plan=checkpoint_plan(cfg)
@@ -176,19 +185,21 @@ class SavingTests(unittest.TestCase):
             runner=self.runner(folder)
             runner.max_iters=cfg['runner']['max_iters']
             runner._max_iters=runner.max_iters
-            hook=self.policy.DorisCheckpointHook(interval=2000,by_epoch=False,
-                key_iterations=plan['extra'],max_keep_ckpts=-1)
+            with self.assertRaises(ValueError):
+                self.policy.DorisCheckpointHook(interval=2000,by_epoch=False,key_iterations=plan['extra'])
+            hook=self.policy.DorisCheckpointHook(interval=2000,by_epoch=False,max_keep_ckpts=-1)
             runner.hooks=[hook];hook.before_run(runner)
             with patch.object(runner,'save_checkpoint',wraps=runner.save_checkpoint) as save:
                 for step in range(1,runner.max_iters+1):
                     runner.iter=step-1;hook.after_train_iter(runner)
-                self.assertEqual(save.call_count,len(plan['all_iterations']))
+                self.assertEqual(save.call_count,7)
             files=sorted(int(p.stem[5:]) for p in Path(folder).glob('iter_*.pth'))
-            self.assertEqual(files,plan['all_iterations'])
+            self.assertEqual(files,[2000,4000,6000])
             latest=torch.load(Path(folder)/'latest.pth')
-            self.assertEqual(latest['meta']['iter'],runner.max_iters-1)
-            self.assertEqual(latest['meta']['doris_checkpoint']['completed_iter'],runner.max_iters)
-            with self.assertRaises(FileExistsError):hook.after_train_iter(runner)
+            self.assertEqual(latest['meta']['iter'],13999)
+            self.assertEqual(latest['meta']['doris_checkpoint']['completed_iter'],14000)
+            self.assertEqual({p.name for p in Path(folder).glob('*.pth')},
+                             {'latest.pth','iter_2000.pth','iter_4000.pth','iter_6000.pth'})
 
     def test_independent_bests_ties_nan_zero_and_resume_from_either_best(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'outputs') as folder:
@@ -216,7 +227,7 @@ class SavingTests(unittest.TestCase):
 
     def test_periodic_after_validation_contains_both_best_records(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'outputs') as folder:
-            runner=self.runner(folder);evaluation=self.evaluation(runner)
+            runner=self.runner(folder);evaluation=self.evaluation(runner,four=True)
             hook=self.policy.DorisCheckpointHook(interval=2000,by_epoch=False)
             runner.hooks=[hook];hook.before_run(runner)
             self.validate(runner,evaluation,2000,.6,.8);hook.after_train_iter(runner)
@@ -284,7 +295,7 @@ class SavingTests(unittest.TestCase):
         runner=Runner()
         cfg=Config(resume_from='latest.pth',load_from=None,uda=dict(type='DACS'),runner=dict(type='IterBasedRunner'))
         exec(compile(ast.Module(body=[block],type_ignores=[]),'resume','exec'),
-            dict(cfg=cfg,runner=runner,osp=osp,re=re,logger=Mock()))
+            dict(cfg=cfg,runner=runner,osp=osp,re=re,logger=Mock(),doris_checkpoints=False))
         self.assertEqual(runner.iter,2000);self.assertEqual(runner.model.local_iter,2000)
 
     def test_single_and_distributed_hooks_use_one_validation_pass(self):

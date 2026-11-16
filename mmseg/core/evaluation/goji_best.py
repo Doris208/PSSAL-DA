@@ -13,19 +13,43 @@ def valid_iou(value):
 
 
 class GojiBestMixin:
-    def __init__(self, *args, save_best_goji=False, **kwargs):
+    def __init__(self, *args, save_best_goji=False, doris_best_only=False, **kwargs):
         self.save_best_goji = save_best_goji
+        self.doris_best_only = doris_best_only
         super().__init__(*args, **kwargs)
-        if save_best_goji and (self.by_epoch or self.save_best != 'mIoU'):
+        if (save_best_goji or doris_best_only) and (self.by_epoch or self.save_best != 'mIoU'):
             raise ValueError('Goji best requires the existing iteration-based Best mIoU validation')
+
+    def evaluate(self, runner, results):
+        if not self.doris_best_only:
+            return super().evaluate(runner, results)
+        # Preserve one dataset evaluation while accepting a missing mIoU field.
+        from mmseg.utils.doris_checkpoint import METRICS
+        for metric in METRICS:
+            runner.log_buffer.output.pop(metric, None)
+        save_best = self.save_best
+        self.save_best = None
+        try:
+            super().evaluate(runner, results)
+        finally:
+            self.save_best = save_best
+        return runner.log_buffer.output.get('mIoU')
 
     def before_run(self, runner):
         super().before_run(runner)
-        if self.save_best_goji:
+        if self.save_best_goji or self.doris_best_only:
             if tuple(self.dataloader.dataset.CLASSES) != ('goji', 'vegetation', 'building', 'water', 'road'):
                 raise ValueError('Expected the unchanged five-class Goji validation dataset')
             if Path(self.out_dir).resolve() != Path(runner.work_dir).resolve():
                 raise ValueError('Best checkpoints must remain in this experiment work_dir')
+            if self.doris_best_only:
+                if runner.rank == 0:
+                    from mmseg.utils.doris_checkpoint import save_bests, best_messages
+                    report = save_bests(runner, {})
+                    if report:
+                        runner.meta['hook_msgs'] = best_messages(runner.meta['hook_msgs'], report)
+                        self.best_ckpt_path = report['mIoU']['path']
+                return
             # Protect files that predate this invocation, including resumed bests.
             self._protected_bests = {str(p.resolve()) for p in Path(self.out_dir).glob('best_*.pth')}
             self._protected_bests.update(str(Path(p).resolve()) for p in
@@ -37,6 +61,13 @@ class GojiBestMixin:
                                    'no earlier Goji best checkpoint is fabricated.', runner.iter)
 
     def _save_ckpt(self, runner, key_score):
+        if self.doris_best_only:
+            if runner.rank == 0:
+                from mmseg.utils.doris_checkpoint import save_bests
+                report = save_bests(runner, runner.log_buffer.output)
+                if report:
+                    self.best_ckpt_path = report['mIoU']['path']
+            return
         if not self.save_best_goji:
             return super()._save_ckpt(runner, key_score)
         messages = runner.meta['hook_msgs']

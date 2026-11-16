@@ -1,3 +1,5 @@
+> 当前策略已升级为四指标 Best、完整滚动 latest 和 Iter 2000／4000／6000 三个完整固定检查点，每实验最多八个权重文件。实施、恢复和验收结果见 [当前说明](doris_best_latest_acceptance_zh.md)。下文保留原策略的历史记录。
+
 # DORIS 历史 Checkpoint 与双指标 Best 保存策略
 
 ## 范围与版本核查
