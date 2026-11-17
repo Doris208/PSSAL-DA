@@ -54,6 +54,14 @@ def train_segmentor(model,
                                              check_doris_resume_checkpoint)
     check_hphy_training_checkpoint(cfg)
     doris_checkpoints = configure_checkpoint_policy(cfg)
+    sensitivity = cfg.get('sensitivity_analysis', {})
+    if sensitivity.get('enabled', False):
+        if distributed or not validate or len(cfg.gpu_ids) != 1:
+            raise ValueError('Sensitivity analysis requires single-GPU full validation')
+        if cfg.checkpoint_config is not None or cfg.resume_from or cfg.load_from:
+            raise ValueError('Sensitivity analysis requires fresh training without checkpoints')
+        if sensitivity['tau_proto'] != cfg.uda.proto_cfg.tau_proto:
+            raise ValueError('Sensitivity metadata and prototype threshold disagree')
 
     # prepare data loaders
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
@@ -156,6 +164,11 @@ def train_segmentor(model,
         eval_cfg = cfg.get('evaluation', {})
         eval_cfg['by_epoch'] = cfg.runner['type'] != 'IterBasedRunner'
         eval_hook = DistEvalHook if distributed else EvalHook
+        if sensitivity.get('enabled', False):
+            from mmseg.core.evaluation.sensitivity_eval_hook import SensitivityEvalHook
+            eval_hook = SensitivityEvalHook
+            eval_cfg = dict(eval_cfg, csv_path=sensitivity['csv_path'],
+                            tau_proto=sensitivity['tau_proto'])
         runner.register_hook(eval_hook(val_dataloader, **eval_cfg))
 
     if cfg.resume_from:

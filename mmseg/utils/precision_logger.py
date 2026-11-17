@@ -70,7 +70,8 @@ class PrecisionLoggerHook(LoggerHook):
                  paper_process_logging=False,
                  log_memory=False,
                  paper_names=False,
-                 process_interval=1000):
+                 process_interval=1000,
+                 log_diagnostics=True):
         super(PrecisionLoggerHook, self).__init__(interval, ignore_last,
                                                   reset_flag, by_epoch)
         self.by_epoch = by_epoch
@@ -85,6 +86,7 @@ class PrecisionLoggerHook(LoggerHook):
         self.log_memory = log_memory
         self.paper_names = paper_names
         self.process_interval = process_interval
+        self.log_diagnostics = log_diagnostics
 
         if out_dir is None and file_client_args is not None:
             raise ValueError(
@@ -140,6 +142,9 @@ class PrecisionLoggerHook(LoggerHook):
         return mem_mb.item()
 
     def _keep_train_key(self, name, keys):
+        if not getattr(self, 'log_diagnostics', True) and name.startswith(
+                ('phy_', 'hphy_', 'doris.')):
+            return False
         if name in ('phy_gate_iter', 'phy_gate_rho', 'phy_gate_active_ratio',
                     'phy_S_mean_active', 'phy_A_mean_active', 'phy_A_max_active'):
             return True

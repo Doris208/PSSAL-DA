@@ -131,6 +131,13 @@ def main(args):
         cfg.load_from = args.load_from
     if args.resume_from is not None:
         cfg.resume_from = args.resume_from
+    if cfg.get('sensitivity_analysis', {}).get('enabled', False):
+        from tools.run_tau_proto_sensitivity import validate_training_config
+        if (args.no_validate or args.deterministic or args.seed not in (None, 0) or
+                args.launcher != 'none' or args.gpus not in (None, 1) or
+                (args.gpu_ids is not None and len(args.gpu_ids) != 1)):
+            raise ValueError('Sensitivity analysis requires the unchanged seed=0 single-GPU validation protocol')
+        validate_training_config(cfg)
     from tools.doris_checkpoint_plan import check_hphy_training_checkpoint, check_doris_resume_checkpoint
     check_doris_resume_checkpoint(cfg)
     check_hphy_training_checkpoint(cfg)
@@ -225,7 +232,8 @@ def main(args):
     model.CLASSES = datasets[0].CLASSES
     model.PALETTE = datasets[0].PALETTE
     # passing checkpoint meta for saving best checkpoint
-    meta.update(cfg.checkpoint_config.meta)
+    if cfg.checkpoint_config is not None:
+        meta.update(cfg.checkpoint_config.meta)
     train_segmentor(
         model,
         datasets,

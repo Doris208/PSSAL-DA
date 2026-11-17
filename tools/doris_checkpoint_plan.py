@@ -81,6 +81,8 @@ def checkpoint_plan(config):
 
 def configure_checkpoint_policy(config):
     """Unified opt-in by the existing DORIS experiment names; other jobs unchanged."""
+    if config.get('sensitivity_analysis', {}).get('enabled', False):
+        return False
     if not applies(config):
         return False
     config['checkpoint_config'] = dict(type='DorisCheckpointHook', by_epoch=False,
@@ -184,9 +186,8 @@ def audit_configs(loader):
     records = []
     for path in sorted((root/'configs/hrda/doris').glob('*/*.py')):
         config = loader(path)
-        if not applies(config):
+        if not configure_checkpoint_policy(config):
             continue
-        configure_checkpoint_policy(config)
         records.append(dict(config=str(path.relative_to(root)), work_dir=config['work_dir'],
             modules={key:dict(config['uda'][key]) for key in
                      ('phy_cfg','struct_cfg','proto_cfg','struct_edge_cfg')},
